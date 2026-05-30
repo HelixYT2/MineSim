@@ -1,0 +1,5 @@
+# Pinned toolchain for reproducible, deterministic builds (see docs/contract.md §4).
+# Pinned to an exact version so every contributor and CI builds bit-identically.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

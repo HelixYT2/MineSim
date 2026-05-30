@@ -1,0 +1,10 @@
+# Determinism policy — see docs/contract.md §4.
+#
+# DO NOT add `target-cpu=native`: it makes builds machine-specific and can introduce FMA
+# contraction or different codegen that breaks bit-exactness across machines. CI must
+# reject any rustflags that enable fast-math, FMA, or `target-cpu=native`.
+[build]
+rustflags = []
+
+[alias]
+xtask = "run --quiet --package xtask --"

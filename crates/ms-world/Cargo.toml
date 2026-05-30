@@ -1,0 +1,11 @@
+[package]
+name = "ms-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ms-numerics = { workspace = true }
+fastanvil = "0.31"
+fastnbt = "2"

@@ -1,0 +1,19 @@
+{
+  "_comment": "Authoritative pin of the MineSim target Minecraft version (Step 1). Artifacts are fetched on demand by tooling (Step 4) and verified against these SHA1s; per docs/clean-room-policy.md the JARs/mappings are NEVER committed to this repo. Source: https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+  "id": "1.21.11",
+  "type": "release",
+  "releaseTime": "2025-12-09T12:23:30+00:00",
+  "javaMajor": 21,
+  "version_json": "https://piston-meta.mojang.com/v1/packages/a0d878d56cf86106a3a51287561e2977ccf301d0/1.21.11.json",
+  "version_json_sha1": "a0d878d56cf86106a3a51287561e2977ccf301d0",
+  "client": "https://piston-data.mojang.com/v1/objects/ba2df812c2d12e0219c489c4cd9a5e1f0760f5bd/client.jar",
+  "client_sha1": "ba2df812c2d12e0219c489c4cd9a5e1f0760f5bd",
+  "client_size": 31152600,
+  "server": "https://piston-data.mojang.com/v1/objects/64bb6d763bed0a9f1d632ec347938594144943ed/server.jar",
+  "server_sha1": "64bb6d763bed0a9f1d632ec347938594144943ed",
+  "server_size": 56327581,
+  "client_mappings": "https://piston-data.mojang.com/v1/objects/031a68bebf55d824f66d6573d8c752f0e1bf232a/client.txt",
+  "client_mappings_sha1": "031a68bebf55d824f66d6573d8c752f0e1bf232a",
+  "server_mappings": "https://piston-data.mojang.com/v1/objects/5621e9253f05fd57872bbe7f8ddf5f9a7d525955/server.txt",
+  "server_mappings_sha1": "5621e9253f05fd57872bbe7f8ddf5f9a7d525955"
+}

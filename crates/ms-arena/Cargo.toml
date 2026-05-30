@@ -1,0 +1,12 @@
+[package]
+name = "ms-arena"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ms-numerics = { workspace = true }
+ms-world = { workspace = true }
+ms-kernel = { workspace = true }
+ms-oracle = { workspace = true }

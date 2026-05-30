@@ -1,0 +1,26 @@
+{
+	"schemaVersion": 1,
+	"id": "minesim",
+	"version": "${version}",
+	"name": "MineSim Probe",
+	"description": "Extracts block collision data and logs player movement traces for MineSim.",
+	"authors": [
+		"MineSim"
+	],
+	"license": "CC0-1.0",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"minesim.MineSimMod"
+		],
+		"client": [
+			"minesim.client.MineSimClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}

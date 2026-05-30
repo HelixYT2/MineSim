@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: build / test / lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is ARM64, which covers the second architecture the numeric layer
+        # must stay bit-identical on.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain (auto-installed from rust-toolchain.toml)
+        run: rustup show
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  determinism-lint:
+    name: determinism flag lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject determinism-breaking codegen/FP flags
+        shell: bash
+        run: |
+          # See docs/contract.md §4: target-cpu=native, fast-math, and FMA contraction
+          # all break cross-machine bit-exactness. Scan build config / source, not docs.
+          if grep -RInE '(-C ?target-cpu=native|-?ffast-math|fp-contract=fast)' \
+               --include='*.toml' --include='*.rs' .; then
+            echo "::error::Forbidden determinism-breaking flag found (see docs/contract.md §4)"
+            exit 1
+          fi
+          echo "OK: no forbidden flags"

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ms-numerics",
+    "crates/ms-rng",
+    "crates/ms-data",
+    "crates/ms-world",
+    "crates/ms-kernel",
+    "crates/ms-arena",
+    "crates/ms-oracle",
+    "crates/ms-py",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+# Internal crates (acyclic: numerics <- rng <- data <- world <- kernel <- arena <- py)
+ms-numerics = { path = "crates/ms-numerics" }
+ms-rng = { path = "crates/ms-rng" }
+ms-data = { path = "crates/ms-data" }
+ms-world = { path = "crates/ms-world" }
+ms-kernel = { path = "crates/ms-kernel" }
+ms-arena = { path = "crates/ms-arena" }
+ms-oracle = { path = "crates/ms-oracle" }
+# External
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[profile.release]
+# Determinism-friendly codegen: a single codegen unit removes cross-unit ordering variance.
+lto = "thin"
+codegen-units = 1

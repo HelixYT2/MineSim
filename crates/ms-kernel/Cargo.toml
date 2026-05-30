@@ -1,0 +1,12 @@
+[package]
+name = "ms-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ms-numerics = { workspace = true }
+ms-rng = { workspace = true }
+ms-data = { workspace = true }
+ms-world = { workspace = true }

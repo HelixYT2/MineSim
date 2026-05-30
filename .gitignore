@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Logs (datagen / tooling)
+/logs/
+
+# Clean-room boundary — NEVER commit decompiled Mojang sources or game artifacts.
+# See docs/clean-room-policy.md.
+/tools/decomp/
+/tools/mc/
+/*.jar
+/mappings/
+/tools/**/build/
+/tools/**/.gradle/
+
+# Datagen / oracle local scratch (golden traces live in corpus/ via Git LFS)
+/corpus/scratch/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+/target/wheels/
+
+# OS
+Thumbs.db
+.DS_Store

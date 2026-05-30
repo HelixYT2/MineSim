@@ -1,0 +1,10 @@
+[package]
+name = "ms-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Becomes a PyO3 cdylib (pyo3 + numpy + ms-arena) once the arena API is in place.
+
+[dependencies]
