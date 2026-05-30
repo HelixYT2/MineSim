@@ -8,7 +8,7 @@
 
 use ms_numerics::{mth, Vec3};
 use ms_world::aabb::Aabb;
-use ms_world::anvil::World;
+use ms_world::World;
 
 const DEG_TO_RAD: f32 = (std::f64::consts::PI / 180.0) as f32;
 const HALF_WIDTH: f64 = (0.6_f32 / 2.0_f32) as f64;

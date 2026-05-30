@@ -11,12 +11,14 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-pub struct World {
+/// A world backed by on-disk Anvil regions. Used to validate the kernel against real saves; the
+/// chunk cache keeps repeated per-block queries cheap.
+pub struct AnvilWorld {
     region_dir: PathBuf,
     chunks: RefCell<HashMap<(i32, i32), Option<CurrentJavaChunk>>>,
 }
 
-impl World {
+impl AnvilWorld {
     pub fn new(region_dir: impl AsRef<Path>) -> Self {
         Self {
             region_dir: region_dir.as_ref().to_path_buf(),
@@ -41,13 +43,6 @@ impl World {
             z.rem_euclid(16) as usize,
         )?;
         Some(block.encoded_description().to_string())
-    }
-
-    /// The namespaced block id at a coordinate, e.g. `"minecraft:stone"` (the name part of the
-    /// encoded description).
-    pub fn block_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
-        self.block_encoded(x, y, z)
-            .map(|e| e.split('|').next().unwrap_or("").to_string())
     }
 
     fn load_chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<CurrentJavaChunk> {

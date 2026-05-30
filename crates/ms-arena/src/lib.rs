@@ -6,7 +6,10 @@
 use ms_kernel::player::{self, Keys};
 use ms_numerics::Vec3;
 use ms_oracle::StateBuf;
-use ms_world::anvil::World;
+use ms_world::World;
+
+mod batch;
+pub use batch::BatchArena;
 
 /// The player's simulated state.
 #[derive(Clone, Copy, Debug)]

@@ -29,6 +29,7 @@ ms-arena = { path = "crates/ms-arena" }
 ms-oracle = { path = "crates/ms-oracle" }
 # External
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rayon = "1"
 
 [profile.release]
 # Determinism-friendly codegen: a single codegen unit removes cross-unit ordering variance.

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "minesim"
+description = "Bit-exact Minecraft 1.21.11 movement simulator for reinforcement learning"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "HelixYT2" }]
+keywords = ["minecraft", "reinforcement-learning", "simulation", "gymnasium"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Games/Entertainment",
+    "License :: OSI Approved :: MIT License",
+]
+dynamic = ["version"]
+dependencies = ["numpy>=1.21"]
+
+[project.optional-dependencies]
+gym = ["gymnasium>=0.29"]
+
+[project.urls]
+Repository = "https://github.com/HelixYT2/MineSim"
+
+[tool.maturin]
+module-name = "minesim._core"
+python-source = "python"

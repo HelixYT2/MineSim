@@ -30,7 +30,7 @@ fn main() -> ExitCode {
                 eprintln!("usage: cargo xtask probe-world <region-dir> <x> <y> <z>");
                 return ExitCode::from(2);
             }
-            let world = ms_world::anvil::World::new(&a[0]);
+            let world = ms_world::World::new(&a[0]);
             let (x, y, z) = (
                 a[1].parse().unwrap(),
                 a[2].parse().unwrap(),
@@ -68,7 +68,10 @@ fn main() -> ExitCode {
             }
         }
         Some("bench") => {
-            println!("bench: not yet implemented");
+            let a: Vec<String> = std::env::args().skip(2).collect();
+            let envs = a.first().and_then(|s| s.parse().ok()).unwrap_or(4096usize);
+            let ticks = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000usize);
+            bench(envs, ticks);
             ExitCode::SUCCESS
         }
         other => {
@@ -294,7 +297,7 @@ fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::E
     use ms_arena::{Action, Arena, Player};
     use ms_kernel::player::Keys;
     use ms_numerics::Vec3;
-    use ms_world::anvil::World;
+    use ms_world::World;
 
     struct Row {
         pos: Vec3,
@@ -421,7 +424,7 @@ fn encoded_key(name: &str, properties: Option<&serde_json::Value>) -> String {
 fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     use ms_kernel::player::{step, Keys};
     use ms_numerics::Vec3;
-    use ms_world::anvil::World;
+    use ms_world::World;
 
     struct Row {
         pos: Vec3,
@@ -536,4 +539,92 @@ fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::erro
         println!("worst: {worst_info}");
     }
     Ok(())
+}
+
+/// Measures stepping throughput on flat terrain with a sprint-jump workload: one env, the whole
+/// batch on a single thread, and the whole batch across the rayon pool. Build with `--release`;
+/// debug numbers are not representative.
+fn bench(envs: usize, ticks: usize) {
+    use ms_arena::{Action, Arena, BatchArena};
+    use ms_kernel::player::Keys;
+    use ms_numerics::Vec3;
+    use ms_world::World;
+    use std::time::Instant;
+
+    let make = |i: usize| Arena::new(World::flat(0), Vec3::new(0.5, 0.0, 0.5), (i % 360) as f32);
+    let actions: Vec<Action> = (0..envs)
+        .map(|i| Action {
+            keys: Keys {
+                forward: true,
+                back: false,
+                left: false,
+                right: false,
+            },
+            jump: true,
+            sprinting: true,
+            sneaking: false,
+            yaw: (i % 360) as f32,
+        })
+        .collect();
+
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    println!("MineSim throughput  (flat world, sprint+jump)");
+    println!("  envs={envs}  ticks={ticks}  hardware-threads={threads}\n");
+
+    {
+        let mut one = BatchArena::from_fn(1, make);
+        let act = actions[..1].to_vec();
+        for _ in 0..100 {
+            one.step_serial(&act);
+        }
+        let t = Instant::now();
+        for _ in 0..ticks {
+            one.step_serial(&act);
+        }
+        report(
+            "single arena  (1 env, 1 thread)",
+            ticks,
+            t.elapsed().as_secs_f64(),
+        );
+    }
+
+    let serial_rate = {
+        let mut b = BatchArena::from_fn(envs, make);
+        for _ in 0..10 {
+            b.step_serial(&actions);
+        }
+        let t = Instant::now();
+        for _ in 0..ticks {
+            b.step_serial(&actions);
+        }
+        let secs = t.elapsed().as_secs_f64();
+        report("batch serial  (1 thread)       ", envs * ticks, secs);
+        (envs * ticks) as f64 / secs
+    };
+
+    {
+        let mut b = BatchArena::from_fn(envs, make);
+        for _ in 0..10 {
+            b.step(&actions);
+        }
+        let t = Instant::now();
+        for _ in 0..ticks {
+            b.step(&actions);
+        }
+        let secs = t.elapsed().as_secs_f64();
+        let rate = (envs * ticks) as f64 / secs;
+        report("batch parallel (rayon)         ", envs * ticks, secs);
+        println!("  parallel speedup over serial: {:.1}x", rate / serial_rate);
+    }
+}
+
+fn report(label: &str, env_ticks: usize, secs: f64) {
+    let rate = env_ticks as f64 / secs;
+    println!(
+        "  {label}: {:>7.2} M env-ticks/s  ({:.1} ns/env-tick)",
+        rate / 1.0e6,
+        1.0e9 / rate
+    );
 }

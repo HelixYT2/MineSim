@@ -22,6 +22,10 @@ __pycache__/
 *.pyc
 .venv/
 /target/wheels/
+# Compiled extension modules built by maturin into the package source tree
+*.pyd
+*.so
+*.egg-info/
 
 # OS
 Thumbs.db

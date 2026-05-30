@@ -10,3 +10,4 @@ ms-numerics = { workspace = true }
 ms-world = { workspace = true }
 ms-kernel = { workspace = true }
 ms-oracle = { workspace = true }
+rayon = { workspace = true }
