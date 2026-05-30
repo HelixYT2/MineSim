@@ -5,8 +5,8 @@ on:
   pull_request:
 
 jobs:
-  check:
-    name: build / test / lint (${{ matrix.os }})
+  rust:
+    name: rust build / test / lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,9 +21,34 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude ms-py --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude ms-py
+
+  python:
+    name: python wheel / binding tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Show toolchain
+        run: rustup show
+      - name: Install maturin and runtime deps
+        run: python -m pip install maturin numpy "gymnasium>=0.29"
+      - name: Lint bindings (deny warnings)
+        run: cargo clippy -p ms-py --all-targets -- -D warnings
+      - name: Build wheel
+        run: maturin build -m crates/ms-py/Cargo.toml --release --out dist
+      - name: Install wheel
+        run: python -m pip install --find-links dist minesim
+      - name: Binding tests
+        run: python crates/ms-py/tests/test_minesim.py
 
   determinism-lint:
     name: determinism flag lint
