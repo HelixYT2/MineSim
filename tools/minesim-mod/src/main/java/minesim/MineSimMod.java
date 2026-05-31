@@ -24,6 +24,7 @@ import java.util.List;
 public class MineSimMod implements ModInitializer {
 	@Override
 	public void onInitialize() {
+		ServerTracer.register();
 		CommandRegistrationCallback.EVENT.register((dispatcher, access, env) ->
 			dispatcher.register(Commands.literal("minesim")
 				.then(Commands.literal("dumpblocks").executes(ctx -> {
