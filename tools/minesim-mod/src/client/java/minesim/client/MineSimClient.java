@@ -30,11 +30,14 @@ import java.nio.file.Path;
 public class MineSimClient implements ClientModInitializer {
 	private static final double NEAR_RADIUS_SQR = 48.0 * 48.0;
 
+	private final AutoScenario scenario = new AutoScenario();
 	private BufferedWriter writer;
 	private long tick;
 
 	@Override
 	public void onInitializeClient() {
+		// The scenario sets inputs at the start of the tick; the logger records the result at the end.
+		ClientTickEvents.START_CLIENT_TICK.register(scenario::tick);
 		ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
 	}
 
