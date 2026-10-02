@@ -94,6 +94,10 @@ pub struct PlayerState {
     pub in_water: bool,
     /// `wasEyeInWater` (`isUnderWater()`).
     pub eye_in_water: bool,
+    /// Whether `fluidOnEyes` holds water: the result of the last `updateFluidOnEyes`, computed from
+    /// that tick's start-of-tick position. The next tick copies it into `eye_in_water`, so the
+    /// recorded flag lags the eye position by one tick. Not recorded in the corpus.
+    pub water_on_eyes: bool,
     /// `isInLava()`.
     pub in_lava: bool,
     pub water_height: f64,
@@ -164,6 +168,7 @@ impl PlayerState {
             fall_distance: 0.0,
             in_water: false,
             eye_in_water: false,
+            water_on_eyes: false,
             in_lava: false,
             water_height: 0.0,
             lava_height: 0.0,
