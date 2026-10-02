@@ -23,22 +23,28 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-// Client-side per-tick trace of the local player and everything around it, written as JSON lines
-// to minesim-trace.jsonl. The player is client-authoritative for movement, so this is the source
-// of truth for movement, fluids/climbing, status effects, attributes, and the velocity response
-// to knockback. One line per client tick.
+// Two modes. With -Dminesim.scenarios set, the scenario oracle (ScenarioRunner) drives the player
+// through the scripted scenarios and writes the corpus. Otherwise the mod passively traces normal play:
+// a per-tick record of the local player and everything around it, written as JSON lines to
+// minesim-trace.jsonl. The player is client-authoritative for movement, so either way this is the
+// source of truth for movement, fluids/climbing, status effects, attributes, and the velocity
+// response to knockback.
 public class MineSimClient implements ClientModInitializer {
 	private static final double NEAR_RADIUS_SQR = 48.0 * 48.0;
 
-	private final AutoScenario scenario = new AutoScenario();
 	private BufferedWriter writer;
 	private long tick;
 
 	@Override
 	public void onInitializeClient() {
-		// The scenario sets inputs at the start of the tick; the logger records the result at the end.
-		ClientTickEvents.START_CLIENT_TICK.register(scenario::tick);
-		ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
+		ScenarioRunner runner = ScenarioRunner.fromSystemProperties();
+		if (runner != null) {
+			// Inputs are set at the start of the tick; the result is recorded at the end.
+			ClientTickEvents.START_CLIENT_TICK.register(runner::startTick);
+			ClientTickEvents.END_CLIENT_TICK.register(runner::endTick);
+		} else {
+			ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
+		}
 	}
 
 	private void onTick(Minecraft client) {

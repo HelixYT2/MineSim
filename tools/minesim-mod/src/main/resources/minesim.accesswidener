@@ -1,0 +1,17 @@
+accessWidener v2 named
+
+# Hidden physics state the oracle traces log every tick, so a replay can start from (and be
+# compared against) the complete state rather than just position and velocity.
+accessible field net/minecraft/world/entity/LivingEntity noJumpDelay I
+mutable field net/minecraft/world/entity/LivingEntity noJumpDelay I
+accessible field net/minecraft/world/entity/LivingEntity lastHurt F
+accessible field net/minecraft/world/entity/LivingEntity jumping Z
+accessible field net/minecraft/world/entity/Entity stuckSpeedMultiplier Lnet/minecraft/world/phys/Vec3;
+accessible field net/minecraft/world/entity/Entity onGroundNoBlocks Z
+accessible field net/minecraft/world/entity/player/Player jumpTriggerTime I
+accessible field net/minecraft/world/food/FoodData exhaustionLevel F
+mutable field net/minecraft/world/food/FoodData exhaustionLevel F
+accessible field net/minecraft/world/entity/projectile/arrow/AbstractArrow life I
+accessible method net/minecraft/world/entity/projectile/arrow/AbstractArrow isInGround ()Z
+accessible field net/minecraft/client/player/LocalPlayer sprintTriggerTime I
+accessible field net/minecraft/world/entity/projectile/arrow/AbstractArrow baseDamage D

@@ -3,6 +3,7 @@ package minesim;
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -13,18 +14,24 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import net.minecraft.world.level.material.FlowingFluid;
+import net.minecraft.world.level.material.FluidState;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
+import minesim.oracle.OracleHooks;
 
-// Server-side: `/minesim dumpblocks` writes every block state's collision boxes and friction.
+// Server-side: `/minesim dumpblocks` writes every block state's collision boxes, fluid, and the
+// per-block friction, speed/jump factors and tags.
 // Coordinates and friction are emitted as raw IEEE-754 bits so they round-trip exactly.
 public class MineSimMod implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		ServerTracer.register();
+		ServerTickEvents.END_SERVER_TICK.register(OracleHooks::onServerTick);
 		CommandRegistrationCallback.EVENT.register((dispatcher, access, env) ->
 			dispatcher.register(Commands.literal("minesim")
 				.then(Commands.literal("dumpblocks").executes(ctx -> {
@@ -38,41 +45,52 @@ public class MineSimMod implements ModInitializer {
 				}))));
 	}
 
-	private static Path dumpBlocks() throws IOException {
-		StringBuilder sb = new StringBuilder("{\n");
-		boolean first = true;
+	// Per block: registry id, implementing class, friction/speed/jump factors and tags. Per state: the
+	// context-free collision boxes, the fluid it carries and its suffocation flag. Floats and doubles
+	// are raw IEEE-754 bits so they round-trip exactly.
+	public static Path dumpBlocks() throws IOException {
+		JsonObject root = new JsonObject();
 		for (Block block : BuiltInRegistries.BLOCK) {
 			String name = BuiltInRegistries.BLOCK.getKey(block).toString();
-			int friction = Float.floatToRawIntBits(block.getFriction());
+			JsonArray tags = new JsonArray();
+			block.defaultBlockState().getTags().map(t -> t.location().toString()).sorted().forEach(tags::add);
 			for (BlockState state : block.getStateDefinition().getPossibleStates()) {
-				int id = Block.getId(state);
+				JsonObject o = new JsonObject();
+				o.addProperty("block", name);
+				o.addProperty("class", block.getClass().getSimpleName());
+				o.addProperty("friction", Float.floatToRawIntBits(block.getFriction()));
+				o.addProperty("speedFactor", Float.floatToRawIntBits(block.getSpeedFactor()));
+				o.addProperty("jumpFactor", Float.floatToRawIntBits(block.getJumpFactor()));
+				o.add("tags", tags);
+				o.addProperty("suffocating", state.isSuffocating(EmptyBlockGetter.INSTANCE, BlockPos.ZERO) ? 1 : 0);
+				FluidState fluid = state.getFluidState();
+				if (!fluid.isEmpty()) {
+					JsonObject fo = new JsonObject();
+					fo.addProperty("type", BuiltInRegistries.FLUID.getKey(fluid.getType()).toString());
+					fo.addProperty("amount", fluid.getAmount());
+					fo.addProperty("source", fluid.isSource() ? 1 : 0);
+					fo.addProperty("falling", fluid.hasProperty(FlowingFluid.FALLING) && fluid.getValue(FlowingFluid.FALLING) ? 1 : 0);
+					fo.addProperty("ownHeight", Float.floatToRawIntBits(fluid.getOwnHeight()));
+					o.add("fluid", fo);
+				}
+				JsonArray aabbs = new JsonArray();
 				VoxelShape shape = state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
-				List<AABB> boxes = shape.toAabbs();
-				if (!first) {
-					sb.append(",\n");
+				for (AABB b : shape.toAabbs()) {
+					JsonArray box = new JsonArray();
+					box.add(Double.doubleToRawLongBits(b.minX));
+					box.add(Double.doubleToRawLongBits(b.minY));
+					box.add(Double.doubleToRawLongBits(b.minZ));
+					box.add(Double.doubleToRawLongBits(b.maxX));
+					box.add(Double.doubleToRawLongBits(b.maxY));
+					box.add(Double.doubleToRawLongBits(b.maxZ));
+					aabbs.add(box);
 				}
-				first = false;
-				sb.append("  \"").append(id).append("\":{\"block\":\"").append(name)
-					.append("\",\"friction\":").append(friction).append(",\"aabbs\":[");
-				for (int i = 0; i < boxes.size(); i++) {
-					AABB b = boxes.get(i);
-					if (i > 0) {
-						sb.append(",");
-					}
-					sb.append("[")
-						.append(Double.doubleToRawLongBits(b.minX)).append(",")
-						.append(Double.doubleToRawLongBits(b.minY)).append(",")
-						.append(Double.doubleToRawLongBits(b.minZ)).append(",")
-						.append(Double.doubleToRawLongBits(b.maxX)).append(",")
-						.append(Double.doubleToRawLongBits(b.maxY)).append(",")
-						.append(Double.doubleToRawLongBits(b.maxZ)).append("]");
-				}
-				sb.append("]}");
+				o.add("aabbs", aabbs);
+				root.add(Integer.toString(Block.getId(state)), o);
 			}
 		}
-		sb.append("\n}\n");
 		Path out = FabricLoader.getInstance().getGameDir().resolve("minesim-blocks.json");
-		Files.writeString(out, sb.toString());
+		Files.writeString(out, TraceJson.GSON.toJson(root));
 		return out;
 	}
 }

@@ -7,5 +7,6 @@ publish.workspace = true
 
 [dependencies]
 ms-numerics = { workspace = true }
+ms-data = { workspace = true }
 fastanvil = "0.31"
 fastnbt = "2"

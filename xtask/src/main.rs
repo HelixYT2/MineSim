@@ -1,6 +1,6 @@
 //! Developer tasks, run via `cargo xtask <task>`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::process::ExitCode;
@@ -10,6 +10,7 @@ const MINESIM_BLOCKS: &str = "tools/mc/minesim-blocks.json";
 const GENERATED_RS: &str = "crates/ms-data/src/generated.rs";
 const GENERATED_SHAPES_RS: &str = "crates/ms-data/src/generated_shapes.rs";
 const STATE_SHAPE_BIN: &str = "crates/ms-data/data/state_shape.bin";
+const STATE_FLAGS_BIN: &str = "crates/ms-data/data/state_flags.bin";
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -36,7 +37,10 @@ fn main() -> ExitCode {
                 a[2].parse().unwrap(),
                 a[3].parse().unwrap(),
             );
-            println!("block at ({x},{y},{z}) = {:?}", world.block_name(x, y, z));
+            println!(
+                "block at ({x},{y},{z}) = {}",
+                ms_data::state_to_string(world.block_state(x, y, z))
+            );
             ExitCode::SUCCESS
         }
         Some("replay-walk") => {
@@ -86,23 +90,46 @@ fn main() -> ExitCode {
 
 type Shape = Vec<[u64; 6]>;
 
+/// One block's datagen definition, in state-id order.
+struct BlockDef {
+    name: String,
+    first: u32,
+    default: u32,
+    /// Properties sorted by name with their values in datagen order. State ids are a mixed-radix
+    /// count over these (the last property varies fastest), which regen verifies for every state.
+    props: Vec<(String, Vec<String>)>,
+}
+
 /// Regenerates the committed `ms-data` tables from the datagen `blocks.json` (block/state
-/// registry) and the mod-extracted `minesim-blocks.json` (per-state collision shapes and
-/// friction). State IDs are contiguous per block, so a block is the half-open range
-/// `[FIRST_STATE[i], FIRST_STATE[i + 1])`. Collision shapes are deduplicated since most blocks
-/// share a few (full cube, empty, the slab/stair variants); each state stores a shape index.
+/// registry and properties) and the mod-extracted `minesim-blocks.json` (per-state collision
+/// shapes, fluids and suffocation; per-block class, friction, speed/jump factors and tags).
+/// Collision shapes are deduplicated since most blocks share a few (full cube, empty, the
+/// slab/stair variants); each state stores a shape index.
 fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
     let blocks_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(BLOCKS_JSON)?)?;
     let obj = blocks_json
         .as_object()
         .ok_or("blocks.json: expected a top-level object")?;
 
-    let mut blocks: Vec<(u32, u32, String)> = Vec::with_capacity(obj.len());
+    let mut blocks: Vec<BlockDef> = Vec::with_capacity(obj.len());
     let mut state_count = 0u32;
     for (name, def) in obj {
         let states = def["states"]
             .as_array()
             .ok_or("block: missing states array")?;
+        let mut props: Vec<(String, Vec<String>)> = Vec::new();
+        if let Some(map) = def.get("properties").and_then(serde_json::Value::as_object) {
+            for (k, vals) in map {
+                let vals = vals
+                    .as_array()
+                    .ok_or("property: expected array")?
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect();
+                props.push((k.clone(), vals));
+            }
+        }
+        props.sort_by(|a, b| a.0.cmp(&b.0));
         let mut first = u32::MAX;
         let mut default = None;
         for state in states {
@@ -113,13 +140,42 @@ fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
                 default = Some(id);
             }
         }
-        blocks.push((first, default.unwrap_or(first), name.clone()));
+        for state in states {
+            let id = u32::try_from(state["id"].as_u64().ok_or("state: missing id")?)?;
+            let mut index = 0u32;
+            for (k, vals) in &props {
+                let v = state["properties"][k.as_str()]
+                    .as_str()
+                    .ok_or("state: missing property")?;
+                let pos = vals.iter().position(|x| x == v).ok_or("unknown value")?;
+                index = index * vals.len() as u32 + pos as u32;
+            }
+            if first + index != id {
+                return Err(
+                    format!("{name}: state {id} breaks the sorted mixed-radix order").into(),
+                );
+            }
+        }
+        blocks.push(BlockDef {
+            name: name.clone(),
+            first,
+            default: default.unwrap_or(first),
+            props,
+        });
     }
-    blocks.sort_by_key(|&(first, _, _)| first);
+    blocks.sort_by_key(|b| b.first);
 
     let n = state_count as usize;
-    let mut friction = vec![0u32; n];
+    let mut friction = vec![0u32; blocks.len()];
+    let mut speed_factor = vec![0u32; blocks.len()];
+    let mut jump_factor = vec![0u32; blocks.len()];
+    let mut class_of = vec![String::new(); blocks.len()];
+    let mut tags_of: Vec<Vec<String>> = vec![Vec::new(); blocks.len()];
     let mut state_shape_raw: Vec<Shape> = vec![Vec::new(); n];
+    // Per state: fluid byte (bits 0-1 kind: 0 none / 1 water / 2 lava, bits 2-5 amount, bit 6
+    // source, bit 7 falling) and flags byte (bit 0 suffocating).
+    let mut state_fluid = vec![0u8; n];
+    let mut state_flags = vec![0u8; n];
     let coll: serde_json::Value = serde_json::from_str(&fs::read_to_string(MINESIM_BLOCKS)?)?;
     let coll = coll
         .as_object()
@@ -131,7 +187,48 @@ fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         covered += 1;
-        friction[id] = v["friction"].as_i64().ok_or("missing friction")? as i32 as u32;
+        let bi = blocks.partition_point(|b| b.first as usize <= id) - 1;
+        let bits = |key: &str| -> Result<u32, Box<dyn std::error::Error>> {
+            Ok(v[key].as_i64().ok_or_else(|| {
+                format!("missing {key} (regenerate minesim-blocks.json with the current mod)")
+            })? as i32 as u32)
+        };
+        friction[bi] = bits("friction")?;
+        speed_factor[bi] = bits("speedFactor")?;
+        jump_factor[bi] = bits("jumpFactor")?;
+        class_of[bi] = v["class"].as_str().unwrap_or("Block").to_string();
+        tags_of[bi] = v["tags"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if v["suffocating"].as_i64() == Some(1) {
+            state_flags[id] |= 1;
+        }
+        if let Some(f) = v.get("fluid").filter(|f| f.is_object()) {
+            let kind: u8 = match f["type"].as_str() {
+                Some("minecraft:water" | "minecraft:flowing_water") => 1,
+                Some("minecraft:lava" | "minecraft:flowing_lava") => 2,
+                other => return Err(format!("unknown fluid {other:?}").into()),
+            };
+            let amount = f["amount"].as_u64().ok_or("fluid: missing amount")? as u8;
+            let own =
+                f32::from_bits(f["ownHeight"].as_i64().ok_or("fluid: ownHeight")? as i32 as u32);
+            if own.to_bits() != (f32::from(amount) / 9.0).to_bits() {
+                return Err(format!("state {id}: fluid height is not amount/9").into());
+            }
+            let mut byte = kind | (amount << 2);
+            if f["source"].as_i64() == Some(1) {
+                byte |= 0x40;
+            }
+            if f["falling"].as_i64() == Some(1) {
+                byte |= 0x80;
+            }
+            state_fluid[id] = byte;
+        }
         let mut shape = Shape::new();
         for b in v["aabbs"].as_array().ok_or("missing aabbs")? {
             let nums = b.as_array().ok_or("aabb: expected array")?;
@@ -144,7 +241,7 @@ fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
         state_shape_raw[id] = shape;
     }
     if covered != n {
-        eprintln!("warning: minesim-blocks covered {covered}/{n} states");
+        return Err(format!("minesim-blocks covered {covered}/{n} states").into());
     }
 
     let mut interner: HashMap<Shape, u16> = HashMap::new();
@@ -159,51 +256,15 @@ fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
         state_shape[s] = idx;
     }
 
-    // Which blocks have more than one distinct collision shape across their states (slabs,
-    // stairs, fences, walls, doors, ...). For single-shape blocks, name -> default suffices.
-    let mut multi_shape = vec![false; blocks.len()];
-    for bi in 0..blocks.len() {
-        let first = blocks[bi].0;
-        let end = if bi + 1 < blocks.len() {
-            blocks[bi + 1].0
-        } else {
-            state_count
-        };
-        let mut seen_shape: Option<u16> = None;
-        for st in first..end {
-            let sh = state_shape[st as usize];
-            match seen_shape {
-                None => seen_shape = Some(sh),
-                Some(s) if s != sh => {
-                    multi_shape[bi] = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Property-aware shape lookup keyed by the fastanvil `encoded_description` form
-    // ("name|prop=val,...", sorted, dropping waterlogged/powered), only for multi-shape blocks.
-    let mut encoded: Vec<(String, u16)> = Vec::new();
-    let mut seen_key = HashSet::new();
-    for (name, def) in obj {
-        for state in def["states"].as_array().ok_or("missing states")? {
-            let id = u32::try_from(state["id"].as_u64().ok_or("missing id")?)?;
-            let block = blocks.partition_point(|&(f, _, _)| f <= id) - 1;
-            if !multi_shape[block] {
-                continue;
-            }
-            let key = encoded_key(name, state.get("properties"));
-            if seen_key.insert(key.clone()) {
-                encoded.push((key, state_shape[id as usize]));
-            }
-        }
-    }
-    encoded.sort_by(|a, b| a.0.cmp(&b.0));
-
-    write_registry(&blocks, state_count)?;
-    write_shapes(&blocks, &friction, &shapes, &encoded)?;
+    write_registry(
+        &blocks,
+        state_count,
+        &class_of,
+        &tags_of,
+        &speed_factor,
+        &jump_factor,
+    )?;
+    write_shapes(&blocks, &friction, &shapes)?;
 
     let mut bin = Vec::with_capacity(n * 2);
     for idx in &state_shape {
@@ -213,6 +274,12 @@ fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(parent)?;
     }
     fs::write(STATE_SHAPE_BIN, bin)?;
+    let mut flags = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        flags.push(state_fluid[i]);
+        flags.push(state_flags[i]);
+    }
+    fs::write(STATE_FLAGS_BIN, flags)?;
 
     println!(
         "{} blocks, {state_count} states, {} unique collision shapes",
@@ -222,7 +289,14 @@ fn regen_data() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_registry(blocks: &[(u32, u32, String)], state_count: u32) -> std::io::Result<()> {
+fn write_registry(
+    blocks: &[BlockDef],
+    state_count: u32,
+    class_of: &[String],
+    tags_of: &[Vec<String>],
+    speed_factor: &[u32],
+    jump_factor: &[u32],
+) -> std::io::Result<()> {
     let mut out = String::from(
         "// @generated by `cargo xtask regen-data` from Minecraft 1.21.11 datagen.\n\
          // Do not edit by hand.\n\n",
@@ -230,27 +304,95 @@ fn write_registry(blocks: &[(u32, u32, String)], state_count: u32) -> std::io::R
     let _ = writeln!(out, "pub const BLOCK_STATE_COUNT: u32 = {state_count};");
     let _ = writeln!(out, "pub const BLOCK_COUNT: usize = {};\n", blocks.len());
     out.push_str("pub static BLOCK_NAMES: &[&str] = &[\n");
-    for (_, _, name) in blocks {
-        let _ = writeln!(out, "    {name:?},");
+    for b in blocks {
+        let _ = writeln!(out, "    {:?},", b.name);
     }
     out.push_str("];\n\npub static FIRST_STATE: &[u32] = &[\n");
-    for &(first, _, _) in blocks {
-        let _ = writeln!(out, "    {first},");
+    for b in blocks {
+        let _ = writeln!(out, "    {},", b.first);
     }
     out.push_str("];\n\npub static DEFAULT_STATE: &[u32] = &[\n");
-    for &(_, default, _) in blocks {
-        let _ = writeln!(out, "    {default},");
+    for b in blocks {
+        let _ = writeln!(out, "    {},", b.default);
+    }
+    out.push_str(
+        "];\n\n/// Per block: its properties sorted by name, each with its values in state order.\n",
+    );
+    out.push_str("pub static BLOCK_PROPERTIES: &[&[(&str, &[&str])]] = &[\n");
+    for b in blocks {
+        out.push_str("    &[");
+        for (i, (k, vals)) in b.props.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "({k:?}, &[");
+            for (j, v) in vals.iter().enumerate() {
+                if j > 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "{v:?}");
+            }
+            out.push_str("])");
+        }
+        out.push_str("],\n");
+    }
+
+    let mut classes: Vec<&str> = class_of.iter().map(String::as_str).collect();
+    classes.sort_unstable();
+    classes.dedup();
+    out.push_str("];\n\n/// Simple names of the game classes implementing blocks.\n");
+    out.push_str("pub static CLASS_NAMES: &[&str] = &[\n");
+    for c in &classes {
+        let _ = writeln!(out, "    {c:?},");
+    }
+    out.push_str(
+        "];\n\n/// Per block: index into `CLASS_NAMES`.\npub static BLOCK_CLASS: &[u16] = &[\n",
+    );
+    for c in class_of {
+        let _ = writeln!(
+            out,
+            "    {},",
+            classes.binary_search(&c.as_str()).unwrap_or(0)
+        );
+    }
+
+    let mut tags: Vec<&str> = tags_of.iter().flatten().map(String::as_str).collect();
+    tags.sort_unstable();
+    tags.dedup();
+    out.push_str("];\n\n/// Every block tag any block belongs to, sorted.\npub static TAG_NAMES: &[&str] = &[\n");
+    for t in &tags {
+        let _ = writeln!(out, "    {t:?},");
+    }
+    out.push_str("];\n\n/// Per block: the indices (into `TAG_NAMES`) of the tags it belongs to, ascending.\n");
+    out.push_str("pub static BLOCK_TAGS: &[&[u16]] = &[\n");
+    for bt in tags_of {
+        let mut idx: Vec<usize> = bt
+            .iter()
+            .map(|t| tags.binary_search(&t.as_str()).unwrap_or(0))
+            .collect();
+        idx.sort_unstable();
+        out.push_str("    &[");
+        for (i, x) in idx.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "{x}");
+        }
+        out.push_str("],\n");
+    }
+    out.push_str("];\n\npub static BLOCK_SPEED_FACTOR: &[f32] = &[\n");
+    for &f in speed_factor {
+        let _ = writeln!(out, "    f32::from_bits({f:#010x}),");
+    }
+    out.push_str("];\n\npub static BLOCK_JUMP_FACTOR: &[f32] = &[\n");
+    for &f in jump_factor {
+        let _ = writeln!(out, "    f32::from_bits({f:#010x}),");
     }
     out.push_str("];\n");
     fs::write(GENERATED_RS, out)
 }
 
-fn write_shapes(
-    blocks: &[(u32, u32, String)],
-    friction: &[u32],
-    shapes: &[Shape],
-    encoded: &[(String, u16)],
-) -> std::io::Result<()> {
+fn write_shapes(blocks: &[BlockDef], friction: &[u32], shapes: &[Shape]) -> std::io::Result<()> {
     let mut out = String::from(
         "// @generated by `cargo xtask regen-data` from Minecraft 1.21.11.\n\
          // Do not edit by hand. Collision coordinates and friction are raw IEEE-754 bits.\n\n",
@@ -274,17 +416,8 @@ fn write_shapes(
         out.push_str("],\n");
     }
     out.push_str("];\n\npub static BLOCK_FRICTION: &[f32] = &[\n");
-    for &(first, _, _) in blocks {
-        let _ = writeln!(
-            out,
-            "    f32::from_bits({:#010x}),",
-            friction[first as usize]
-        );
-    }
-    out.push_str("];\n\n// Property-aware shape lookup (sorted by key) for multi-shape blocks.\n");
-    out.push_str("pub static ENCODED: &[(&str, u16)] = &[\n");
-    for (key, idx) in encoded {
-        let _ = writeln!(out, "    ({key:?}, {idx}),");
+    for (bi, _) in blocks.iter().enumerate() {
+        let _ = writeln!(out, "    f32::from_bits({:#010x}),", friction[bi]);
     }
     out.push_str("];\n");
     fs::write(GENERATED_SHAPES_RS, out)
@@ -393,29 +526,6 @@ fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::E
         rows.len() - 1
     );
     Ok(())
-}
-
-/// The fastanvil `encoded_description` form: `"name|prop=val,..."`, properties sorted, dropping
-/// `waterlogged`/`powered` (which never change collision shape).
-fn encoded_key(name: &str, properties: Option<&serde_json::Value>) -> String {
-    let mut key = format!("{name}|");
-    if let Some(map) = properties.and_then(serde_json::Value::as_object) {
-        let mut kv: Vec<(&str, &str)> = map
-            .iter()
-            .filter(|(k, _)| k.as_str() != "waterlogged" && k.as_str() != "powered")
-            .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("")))
-            .collect();
-        kv.sort_unstable();
-        let mut sep = "";
-        for (k, v) in kv {
-            key.push_str(sep);
-            key.push_str(k);
-            key.push('=');
-            key.push_str(v);
-            sep = ",";
-        }
-    }
-    key
 }
 
 /// Replays a recorded walk through the full world-collision step, comparing predicted velocity

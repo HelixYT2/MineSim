@@ -1,29 +1,45 @@
 //! Reading blocks out of a vanilla world's Anvil region files.
 //!
-//! Read-path only: enough to resolve the block at a coordinate so collision can gather the
+//! Read-path only: enough to resolve the block state at a coordinate so collision can gather the
 //! shapes around an entity. Parsed chunks are cached, since collision queries many blocks per
-//! tick and re-decoding a region per block would be unusably slow. Chunk decoding is delegated
-//! to `fastanvil`/`fastnbt`.
+//! tick and re-decoding a region per block would be unusably slow, and so are the text-to-state-id
+//! conversions. Chunk decoding is delegated to `fastanvil`/`fastnbt`.
 
 use fastanvil::{Chunk, CurrentJavaChunk, Region};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// A world backed by on-disk Anvil regions. Used to validate the kernel against real saves; the
 /// chunk cache keeps repeated per-block queries cheap.
 pub struct AnvilWorld {
     region_dir: PathBuf,
-    chunks: RefCell<HashMap<(i32, i32), Option<CurrentJavaChunk>>>,
+    chunks: Mutex<HashMap<(i32, i32), Option<CurrentJavaChunk>>>,
+    states: Mutex<HashMap<String, u32>>,
 }
 
 impl AnvilWorld {
     pub fn new(region_dir: impl AsRef<Path>) -> Self {
         Self {
             region_dir: region_dir.as_ref().to_path_buf(),
-            chunks: RefCell::new(HashMap::new()),
+            chunks: Mutex::new(HashMap::new()),
+            states: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The block state id at a coordinate; air if the chunk/region is absent, the position is
+    /// outside the build range, or the block is unknown to this version's registry.
+    pub fn block_state(&self, x: i32, y: i32, z: i32) -> u32 {
+        let Some(enc) = self.block_encoded(x, y, z) else {
+            return ms_data::AIR;
+        };
+        if let Some(&s) = self.states.lock().unwrap().get(&enc) {
+            return s;
+        }
+        let s = ms_data::parse_state(&enc).unwrap_or(ms_data::AIR);
+        self.states.lock().unwrap().insert(enc, s);
+        s
     }
 
     /// The block's `encoded_description` at a coordinate ("name|prop=val,..."), or `None` if the
@@ -31,11 +47,19 @@ impl AnvilWorld {
     pub fn block_encoded(&self, x: i32, y: i32, z: i32) -> Option<String> {
         let chunk_x = x.div_euclid(16);
         let chunk_z = z.div_euclid(16);
-        if !self.chunks.borrow().contains_key(&(chunk_x, chunk_z)) {
+        if !self
+            .chunks
+            .lock()
+            .unwrap()
+            .contains_key(&(chunk_x, chunk_z))
+        {
             let loaded = self.load_chunk(chunk_x, chunk_z);
-            self.chunks.borrow_mut().insert((chunk_x, chunk_z), loaded);
+            self.chunks
+                .lock()
+                .unwrap()
+                .insert((chunk_x, chunk_z), loaded);
         }
-        let cache = self.chunks.borrow();
+        let cache = self.chunks.lock().unwrap();
         let chunk = cache.get(&(chunk_x, chunk_z))?.as_ref()?;
         let block = chunk.block(
             x.rem_euclid(16) as usize,

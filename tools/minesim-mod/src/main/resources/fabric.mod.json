@@ -3,7 +3,7 @@
 	"id": "minesim",
 	"version": "${version}",
 	"name": "MineSim Probe",
-	"description": "Extracts block collision data and logs player movement traces for MineSim.",
+	"description": "Extracts block data and records vanilla ground-truth traces (scenario oracle) for MineSim.",
 	"authors": [
 		"MineSim"
 	],
@@ -22,5 +22,6 @@
 		"minecraft": "~1.21.11",
 		"java": ">=21",
 		"fabric-api": "*"
-	}
+	},
+	"accessWidener": "minesim.accesswidener"
 }

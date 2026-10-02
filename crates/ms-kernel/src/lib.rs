@@ -1,8 +1,13 @@
-//! The simulation kernel: the per-tick phase order and scheduling, entity movement and
-//! per-axis collision against block shapes, the player input/physics model, knockback and
-//! effects, and projectiles.
+//! The simulation kernel: the player's per-tick physics (input, sprinting and crouching rules,
+//! jumping, travel through air and fluids, climbing, per-axis collision with step-up), status
+//! effects and attributes, damage and knockback, block behaviours, and projectiles.
 
 #![forbid(unsafe_code)]
 
+pub mod attributes;
 pub mod collision;
+pub mod effects;
 pub mod player;
+pub mod state;
+
+pub use state::{Input, PlayerState, Pose};

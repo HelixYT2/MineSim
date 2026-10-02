@@ -303,6 +303,7 @@ version = "0.0.0"
 dependencies = [
  "fastanvil",
  "fastnbt",
+ "ms-data",
  "ms-numerics",
 ]
 
@@ -696,6 +697,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "ms-arena",
+ "ms-data",
  "ms-kernel",
  "ms-numerics",
  "ms-world",

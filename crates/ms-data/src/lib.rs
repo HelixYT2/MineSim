@@ -1,7 +1,13 @@
-//! Generated, version-specific game data: the block-state registry, and later the section
-//! palette helpers, per-state collision shapes, attributes, and tags. The tables are produced
-//! by `cargo xtask regen-data` from the target version's datagen output, so retargeting is
-//! mostly a matter of regenerating rather than rewriting.
+//! Generated, version-specific game data: the block-state registry with every block's
+//! properties, per-state collision shapes, fluids and suffocation, and per-block friction,
+//! speed/jump factors, implementing class and tags. The tables are produced by
+//! `cargo xtask regen-data` from the target version's datagen output, so retargeting is mostly a
+//! matter of regenerating rather than rewriting.
+//!
+//! Everything is keyed by the game's numeric block-state id (`u32`, air = 0). Text forms —
+//! `"minecraft:oak_stairs[facing=east,half=bottom]"` (command syntax) and
+//! `"minecraft:oak_stairs|facing=east,half=bottom"` (the Anvil reader's form) — are parsed with
+//! [`parse_state`].
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +21,9 @@ pub use generated::{BLOCK_COUNT, BLOCK_STATE_COUNT};
 
 const _: () = assert!(BLOCK_COUNT > 1000);
 const _: () = assert!(BLOCK_STATE_COUNT > 20_000);
+
+/// The air block state.
+pub const AIR: u32 = 0;
 
 /// Namespaced id of a block, e.g. `"minecraft:stone"`.
 pub fn block_name(block: usize) -> &'static str {
@@ -34,9 +43,15 @@ pub fn block_of_state(state: u32) -> usize {
 }
 
 static STATE_SHAPE: &[u8] = include_bytes!("../data/state_shape.bin");
+static STATE_FLAGS: &[u8] = include_bytes!("../data/state_flags.bin");
+
+const _: () = assert!(STATE_SHAPE.len() == BLOCK_STATE_COUNT as usize * 2);
+const _: () = assert!(STATE_FLAGS.len() == BLOCK_STATE_COUNT as usize * 2);
 
 /// Collision boxes of a block state as `[minX, minY, minZ, maxX, maxY, maxZ]` in block-local
-/// coordinates. Empty for non-colliding states such as air and plants.
+/// coordinates, for a context-free query (no entity). Empty for non-colliding states such as air
+/// and plants. A few blocks (scaffolding, powder snow) collide differently depending on the
+/// entity; the kernel handles those.
 pub fn collision_boxes(state: u32) -> &'static [[f64; 6]] {
     assert!(state < BLOCK_STATE_COUNT, "state id {state} out of range");
     let i = state as usize * 2;
@@ -47,6 +62,90 @@ pub fn collision_boxes(state: u32) -> &'static [[f64; 6]] {
 /// The block's friction (slipperiness): 0.6 for most blocks, 0.98 for ice, 0.8 for slime.
 pub fn block_friction(block: usize) -> f32 {
     generated_shapes::BLOCK_FRICTION[block]
+}
+
+/// The block's speed factor: 1.0 for most blocks, 0.4 for soul sand and honey.
+pub fn block_speed_factor(block: usize) -> f32 {
+    generated::BLOCK_SPEED_FACTOR[block]
+}
+
+/// The block's jump factor: 1.0 for most blocks, 0.5 for honey.
+pub fn block_jump_factor(block: usize) -> f32 {
+    generated::BLOCK_JUMP_FACTOR[block]
+}
+
+/// Simple name of the game class implementing the block (`"SlimeBlock"`, `"LadderBlock"`, ...).
+/// Behaviour that the game attaches to a block class rather than a tag keys off this.
+pub fn block_class(block: usize) -> &'static str {
+    generated::CLASS_NAMES[generated::BLOCK_CLASS[block] as usize]
+}
+
+/// Whether the block is in the block tag `tag` (e.g. `"minecraft:climbable"`).
+pub fn block_has_tag(block: usize, tag: &str) -> bool {
+    match generated::TAG_NAMES.binary_search(&tag) {
+        Ok(t) => generated::BLOCK_TAGS[block]
+            .binary_search(&(t as u16))
+            .is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// The kind of fluid a block state contains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FluidKind {
+    Empty,
+    Water,
+    Lava,
+}
+
+/// The fluid a block state carries: water/lava source and flowing blocks, waterlogged blocks,
+/// bubble columns, kelp, and so on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fluid {
+    pub kind: FluidKind,
+    /// 1..=8 (8 for sources and falling fluid), 0 when empty.
+    pub amount: u8,
+    pub source: bool,
+    pub falling: bool,
+}
+
+impl Fluid {
+    pub const EMPTY: Fluid = Fluid {
+        kind: FluidKind::Empty,
+        amount: 0,
+        source: false,
+        falling: false,
+    };
+
+    pub fn is_empty(self) -> bool {
+        self.kind == FluidKind::Empty
+    }
+
+    /// `FluidState.getOwnHeight`: the fluid surface within its block, `amount / 9`.
+    pub fn own_height(self) -> f32 {
+        f32::from(self.amount) / 9.0
+    }
+}
+
+/// The fluid in `state`.
+pub fn fluid(state: u32) -> Fluid {
+    let b = STATE_FLAGS[state as usize * 2];
+    let kind = match b & 3 {
+        1 => FluidKind::Water,
+        2 => FluidKind::Lava,
+        _ => return Fluid::EMPTY,
+    };
+    Fluid {
+        kind,
+        amount: (b >> 2) & 0xf,
+        source: b & 0x40 != 0,
+        falling: b & 0x80 != 0,
+    }
+}
+
+/// `BlockState.isSuffocating` for a context-free query.
+pub fn is_suffocating(state: u32) -> bool {
+    STATE_FLAGS[state as usize * 2 + 1] & 1 != 0
 }
 
 fn index_by_name() -> &'static HashMap<&'static str, usize> {
@@ -60,76 +159,114 @@ fn index_by_name() -> &'static HashMap<&'static str, usize> {
     })
 }
 
-/// Block index for a namespaced id, or `None` if unknown.
+/// Block index for a namespaced id (`"minecraft:"` may be omitted), or `None` if unknown.
 pub fn block_index(name: &str) -> Option<usize> {
-    index_by_name().get(name).copied()
+    let map = index_by_name();
+    map.get(name).copied().or_else(|| {
+        if name.contains(':') {
+            None
+        } else {
+            map.get(format!("minecraft:{name}").as_str()).copied()
+        }
+    })
 }
 
-/// Collision boxes for a block looked up by name, using its default state. Exact for full-cube
-/// blocks (all states share the shape); approximate for blocks whose placed state differs from
-/// the default (slabs, stairs) until property-aware resolution lands.
-pub fn collision_boxes_for_name(name: &str) -> &'static [[f64; 6]] {
-    match block_index(name) {
-        Some(b) => collision_boxes(default_state(b)),
-        None => &[],
-    }
+/// The properties of a block, sorted by name, each with its possible values in state order.
+pub fn block_properties(block: usize) -> &'static [(&'static str, &'static [&'static str])] {
+    generated::BLOCK_PROPERTIES[block]
 }
 
-/// Friction for a block looked up by name (0.6 if unknown).
-pub fn friction_for_name(name: &str) -> f32 {
-    match block_index(name) {
-        Some(b) => block_friction(b),
-        None => 0.6,
+/// The value of property `name` in `state`, or `None` if the block has no such property.
+pub fn property(state: u32, name: &str) -> Option<&'static str> {
+    let block = block_of_state(state);
+    let props = block_properties(block);
+    let mut rest = state - generated::FIRST_STATE[block];
+    let mut found = None;
+    for (k, vals) in props.iter().rev() {
+        let n = vals.len() as u32;
+        if *k == name {
+            found = Some(vals[(rest % n) as usize]);
+        }
+        rest /= n;
     }
+    found
 }
 
-/// Collision boxes for a block's `encoded_description` ("name|prop=val,..."). Multi-shape blocks
-/// (slabs, stairs, fences, ...) resolve their exact state; everything else falls back to the
-/// (shape-identical) default state by name.
-pub fn collision_boxes_for_encoded(encoded: &str) -> &'static [[f64; 6]] {
-    match generated_shapes::ENCODED.binary_search_by(|&(k, _)| k.cmp(encoded)) {
-        Ok(i) => generated_shapes::SHAPES[generated_shapes::ENCODED[i].1 as usize],
-        Err(_) => collision_boxes_for_name(encoded.split('|').next().unwrap_or(encoded)),
-    }
+/// `state` with property `name` set to `value`, or `None` if the block lacks that property or
+/// value.
+pub fn with_property(state: u32, name: &str, value: &str) -> Option<u32> {
+    let block = block_of_state(state);
+    let props = block_properties(block);
+    let first = generated::FIRST_STATE[block];
+    let mut digits = decode(state - first, props);
+    let i = props.iter().position(|(k, _)| *k == name)?;
+    digits[i] = props[i].1.iter().position(|v| *v == value)? as u32;
+    Some(first + encode(&digits, props))
 }
 
-#[cfg(test)]
-mod collision_tests {
-    use super::*;
-
-    fn block(name: &str) -> usize {
-        (0..BLOCK_COUNT).find(|&b| block_name(b) == name).unwrap()
+fn decode(mut index: u32, props: &[(&str, &[&str])]) -> Vec<u32> {
+    let mut digits = vec![0; props.len()];
+    for (i, (_, vals)) in props.iter().enumerate().rev() {
+        let n = vals.len() as u32;
+        digits[i] = index % n;
+        index /= n;
     }
+    digits
+}
 
-    #[test]
-    fn stone_is_a_full_cube() {
-        let stone = block("minecraft:stone");
-        assert_eq!(block_friction(stone), 0.6_f32);
-        assert_eq!(
-            collision_boxes(default_state(stone)),
-            &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
-        );
-    }
+fn encode(digits: &[u32], props: &[(&str, &[&str])]) -> u32 {
+    digits
+        .iter()
+        .zip(props)
+        .fold(0, |acc, (&d, (_, vals))| acc * vals.len() as u32 + d)
+}
 
-    #[test]
-    fn ice_is_slippery() {
-        assert_eq!(block_friction(block("minecraft:ice")), 0.98_f32);
+/// Parse a block state from its text form: `"minecraft:ladder[facing=north]"` (command
+/// syntax), `"minecraft:ladder|facing=north"` (the Anvil reader's form), or a bare block id for
+/// its default state. Properties that are not given keep their default-state values.
+pub fn parse_state(text: &str) -> Option<u32> {
+    let text = text.trim();
+    let (name, props) = match text.find(['[', '|']) {
+        Some(i) => (&text[..i], text[i + 1..].trim_end_matches(']').trim()),
+        None => (text, ""),
+    };
+    let block = block_index(name.trim())?;
+    let mut state = default_state(block);
+    for kv in props.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (k, v) = kv.split_once('=')?;
+        state = with_property(state, k.trim(), v.trim())?;
     }
+    Some(state)
+}
 
-    #[test]
-    fn air_has_no_collision() {
-        assert!(collision_boxes(default_state(block("minecraft:air"))).is_empty());
+/// The command-syntax text of a state, e.g. `"minecraft:oak_stairs[facing=east,half=bottom,...]"`.
+pub fn state_to_string(state: u32) -> String {
+    let block = block_of_state(state);
+    let props = block_properties(block);
+    let mut out = block_name(block).to_string();
+    if !props.is_empty() {
+        let digits = decode(state - generated::FIRST_STATE[block], props);
+        out.push('[');
+        for (i, ((k, vals), d)) in props.iter().zip(&digits).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(k);
+            out.push('=');
+            out.push_str(vals[*d as usize]);
+        }
+        out.push(']');
     }
-
-    #[test]
-    fn friction_table_matches_block_count() {
-        assert_eq!(generated_shapes::BLOCK_FRICTION.len(), BLOCK_COUNT);
-    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block(name: &str) -> usize {
+        block_index(name).unwrap()
+    }
 
     #[test]
     fn air_is_the_first_block() {
@@ -155,5 +292,101 @@ mod tests {
         assert_eq!(generated::BLOCK_NAMES.len(), BLOCK_COUNT);
         assert_eq!(generated::FIRST_STATE.len(), BLOCK_COUNT);
         assert_eq!(generated::DEFAULT_STATE.len(), BLOCK_COUNT);
+        assert_eq!(generated::BLOCK_PROPERTIES.len(), BLOCK_COUNT);
+        assert_eq!(generated::BLOCK_CLASS.len(), BLOCK_COUNT);
+        assert_eq!(generated::BLOCK_TAGS.len(), BLOCK_COUNT);
+        assert_eq!(generated::BLOCK_SPEED_FACTOR.len(), BLOCK_COUNT);
+        assert_eq!(generated::BLOCK_JUMP_FACTOR.len(), BLOCK_COUNT);
+        assert_eq!(generated_shapes::BLOCK_FRICTION.len(), BLOCK_COUNT);
+    }
+
+    #[test]
+    fn every_state_round_trips_through_text() {
+        for state in 0..BLOCK_STATE_COUNT {
+            let text = state_to_string(state);
+            assert_eq!(parse_state(&text), Some(state), "{text}");
+        }
+    }
+
+    #[test]
+    fn parses_partial_and_anvil_forms() {
+        let ladder = parse_state("minecraft:ladder[facing=east]").unwrap();
+        assert_eq!(property(ladder, "facing"), Some("east"));
+        assert_eq!(property(ladder, "waterlogged"), Some("false"));
+        assert_eq!(
+            parse_state("ladder|facing=east,waterlogged=false"),
+            Some(ladder)
+        );
+        assert_eq!(
+            parse_state("minecraft:stone"),
+            Some(default_state(block("minecraft:stone")))
+        );
+        assert_eq!(parse_state("minecraft:nope"), None);
+        assert_eq!(parse_state("minecraft:ladder[facing=up]"), None);
+    }
+
+    #[test]
+    fn stone_is_a_full_cube() {
+        let stone = block("minecraft:stone");
+        assert_eq!(block_friction(stone), 0.6_f32);
+        assert_eq!(
+            collision_boxes(default_state(stone)),
+            &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
+        );
+    }
+
+    #[test]
+    fn block_factors() {
+        assert_eq!(block_friction(block("minecraft:ice")), 0.98_f32);
+        assert_eq!(block_friction(block("minecraft:slime_block")), 0.8_f32);
+        assert_eq!(block_speed_factor(block("minecraft:soul_sand")), 0.4_f32);
+        assert_eq!(block_speed_factor(block("minecraft:honey_block")), 0.4_f32);
+        assert_eq!(block_jump_factor(block("minecraft:honey_block")), 0.5_f32);
+        assert_eq!(block_speed_factor(block("minecraft:stone")), 1.0_f32);
+    }
+
+    #[test]
+    fn classes_and_tags() {
+        assert_eq!(block_class(block("minecraft:slime_block")), "SlimeBlock");
+        assert!(block_has_tag(
+            block("minecraft:ladder"),
+            "minecraft:climbable"
+        ));
+        assert!(!block_has_tag(
+            block("minecraft:stone"),
+            "minecraft:climbable"
+        ));
+        assert!(block_has_tag(
+            block("minecraft:oak_fence"),
+            "minecraft:fences"
+        ));
+    }
+
+    #[test]
+    fn fluids() {
+        let src = parse_state("minecraft:water[level=0]").unwrap();
+        let f = fluid(src);
+        assert_eq!(f.kind, FluidKind::Water);
+        assert!(f.source);
+        assert_eq!(f.amount, 8);
+        let flowing = fluid(parse_state("minecraft:water[level=3]").unwrap());
+        assert_eq!(flowing.amount, 5);
+        assert!(!flowing.source && !flowing.falling);
+        let falling = fluid(parse_state("minecraft:water[level=8]").unwrap());
+        assert!(falling.falling);
+        assert!(fluid(AIR).is_empty());
+        let logged = parse_state("minecraft:oak_stairs[waterlogged=true]").unwrap();
+        assert_eq!(fluid(logged).kind, FluidKind::Water);
+        assert_eq!(
+            fluid(parse_state("minecraft:lava").unwrap()).kind,
+            FluidKind::Lava
+        );
+    }
+
+    #[test]
+    fn air_has_no_collision() {
+        assert!(collision_boxes(AIR).is_empty());
+        assert!(!is_suffocating(AIR));
+        assert!(is_suffocating(default_state(block("minecraft:stone"))));
     }
 }

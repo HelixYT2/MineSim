@@ -37,17 +37,18 @@ impl PyArena {
         y: f64,
         z: f64,
         yaw: f32,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let world = match region_dir {
             Some(dir) => World::new(dir),
             None => match floor_block {
-                Some(b) => World::flat_of(surface_y, b),
+                Some(b) => World::flat_of(surface_y, &b)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?,
                 None => World::flat(surface_y),
             },
         };
-        Self {
+        Ok(Self {
             inner: Arena::new(world, Vec3::new(x, y, z), yaw),
-        }
+        })
     }
 
     /// Reset the player to a position/orientation, at rest. The world is unchanged.
@@ -160,18 +161,17 @@ impl PyBatch {
         y: f64,
         z: f64,
         yaw: f32,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let spawn = Vec3::new(x, y, z);
-        let make = |_i: usize| {
-            let world = match &floor_block {
-                Some(b) => World::flat_of(surface_y, b.clone()),
-                None => World::flat(surface_y),
-            };
-            Arena::new(world, spawn, yaw)
+        let world = match &floor_block {
+            Some(b) => {
+                World::flat_of(surface_y, b).map_err(pyo3::exceptions::PyValueError::new_err)?
+            }
+            None => World::flat(surface_y),
         };
-        Self {
-            inner: BatchArena::from_fn(num_envs, make),
-        }
+        Ok(Self {
+            inner: BatchArena::from_fn(num_envs, |_| Arena::new(world.clone(), spawn, yaw)),
+        })
     }
 
     fn __len__(&self) -> usize {

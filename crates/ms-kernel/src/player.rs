@@ -170,21 +170,19 @@ fn gather_in(world: &World, region: Aabb) -> Vec<Aabb> {
     for bx in x0..=x1 {
         for by in y0..=y1 {
             for bz in z0..=z1 {
-                if let Some(enc) = world.block_encoded(bx, by, bz) {
-                    for s in ms_data::collision_boxes_for_encoded(&enc) {
-                        out.push(Aabb::new(
-                            Vec3::new(
-                                f64::from(bx) + s[0],
-                                f64::from(by) + s[1],
-                                f64::from(bz) + s[2],
-                            ),
-                            Vec3::new(
-                                f64::from(bx) + s[3],
-                                f64::from(by) + s[4],
-                                f64::from(bz) + s[5],
-                            ),
-                        ));
-                    }
+                for s in ms_data::collision_boxes(world.block_state(bx, by, bz)) {
+                    out.push(Aabb::new(
+                        Vec3::new(
+                            f64::from(bx) + s[0],
+                            f64::from(by) + s[1],
+                            f64::from(bz) + s[2],
+                        ),
+                        Vec3::new(
+                            f64::from(bx) + s[3],
+                            f64::from(by) + s[4],
+                            f64::from(bz) + s[5],
+                        ),
+                    ));
                 }
             }
         }
@@ -224,10 +222,7 @@ fn block_below_friction(world: &World, pos: Vec3, on_ground: bool) -> f32 {
     let bx = pos.x.floor() as i32;
     let by = (pos.y - 0.5).floor() as i32;
     let bz = pos.z.floor() as i32;
-    match world.block_name(bx, by, bz) {
-        Some(name) => ms_data::friction_for_name(&name),
-        None => 0.6,
-    }
+    ms_data::block_friction(world.block(bx, by, bz))
 }
 
 /// One full grounded tick over a real world: velocity rounding, input, jump, then `travelInAir`

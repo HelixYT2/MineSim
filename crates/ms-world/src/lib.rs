@@ -9,6 +9,9 @@ pub mod aabb;
 pub mod anvil;
 pub mod coords;
 pub mod flat;
+pub mod grid;
 pub mod world;
 
+pub use flat::FlatWorld;
+pub use grid::GridWorld;
 pub use world::World;
