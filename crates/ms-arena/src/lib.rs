@@ -13,7 +13,6 @@
 use ms_kernel::damage::{self, DamageSource, TickStart};
 use ms_kernel::{effects, player};
 use ms_numerics::Vec3;
-use ms_oracle::StateBuf;
 use ms_world::World;
 
 mod batch;
@@ -142,46 +141,10 @@ impl Arena {
         damage::reset_server_copy(p);
     }
 
-    /// The canonical per-tick state hash (`docs/contract.md`). The fields, in serialization
-    /// order: position (3 x f64), velocity (3 x f64), fall distance (f64); yaw, pitch, `xxa`,
-    /// `yya`, `zza` (f32); the flags on ground, horizontal collision, vertical collision, sprinting,
-    /// swimming, in water, in lava and no-physics (one byte each); the integers no-jump delay, tick
-    /// count and food level (i32), and the pose ordinal (u32).
+    /// The canonical per-tick state hash, `H(t)` of `docs/contract.md` (contract-v1): the same
+    /// function the oracle corpus and the golden lock use.
     pub fn state_hash(&self) -> u64 {
-        let p = &self.player;
-        let pose = match p.pose {
-            Pose::Standing => 0_u32,
-            Pose::Crouching => 1,
-            Pose::Swimming => 2,
-            Pose::FallFlying => 3,
-            Pose::Dying => 4,
-        };
-        let mut buf = StateBuf::new();
-        buf.push_f64(p.pos.x)
-            .push_f64(p.pos.y)
-            .push_f64(p.pos.z)
-            .push_f64(p.vel.x)
-            .push_f64(p.vel.y)
-            .push_f64(p.vel.z)
-            .push_f64(p.fall_distance)
-            .push_f32(p.yaw)
-            .push_f32(p.pitch)
-            .push_f32(p.xxa)
-            .push_f32(0.0) // yya: always zero for the player
-            .push_f32(p.zza)
-            .push_bool(p.on_ground)
-            .push_bool(p.horizontal_collision)
-            .push_bool(p.vertical_collision)
-            .push_bool(p.sprinting)
-            .push_bool(p.swimming)
-            .push_bool(p.in_water)
-            .push_bool(p.in_lava)
-            .push_bool(false) // noPhysics
-            .push_i32(p.no_jump_delay)
-            .push_i32(p.tick_count)
-            .push_i32(p.food)
-            .push_u32(pose);
-        buf.hash()
+        ms_oracle::player::player_hash(&self.player)
     }
 }
 
