@@ -5,9 +5,13 @@
 #![forbid(unsafe_code)]
 
 pub mod attributes;
+pub mod blocks;
 pub mod collision;
+pub mod damage;
 pub mod effects;
+pub mod fluids;
 pub mod player;
+pub mod projectile;
 pub mod state;
 
 pub use state::{Input, PlayerState, Pose};

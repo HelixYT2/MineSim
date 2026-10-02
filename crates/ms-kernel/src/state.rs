@@ -214,4 +214,21 @@ impl PlayerState {
     pub fn is_alive(&self) -> bool {
         self.health > 0.0
     }
+
+    /// Eye height for the current pose (`Entity.getEyeHeight`; the player's is 1.62 standing,
+    /// 1.27 crouching, 0.4 swimming).
+    pub fn eye_height(&self) -> f32 {
+        let base: f32 = match self.pose {
+            Pose::Standing => 1.62,
+            Pose::Crouching => 1.27,
+            Pose::Swimming | Pose::FallFlying => 0.4,
+            Pose::Dying => 0.2 * 0.85,
+        };
+        let scale = self.attributes.value(crate::attributes::Attribute::Scale) as f32;
+        if scale == 1.0 {
+            base
+        } else {
+            base * scale
+        }
+    }
 }

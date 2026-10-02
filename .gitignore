@@ -14,7 +14,7 @@
 /tools/**/build/
 /tools/**/.gradle/
 
-# Datagen / oracle local scratch (golden traces live in corpus/ via Git LFS)
+# Datagen / oracle local scratch (the committed corpus lives in corpus/ as .jsonl.gz)
 /corpus/scratch/
 
 # Python
@@ -30,3 +30,4 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+.claude/

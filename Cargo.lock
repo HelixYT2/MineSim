@@ -257,6 +257,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ms-corpus"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "ms-data",
+ "ms-kernel",
+ "ms-numerics",
+ "ms-world",
+ "serde_json",
+]
+
+[[package]]
 name = "ms-data"
 version = "0.0.0"
 

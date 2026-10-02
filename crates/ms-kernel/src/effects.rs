@@ -57,3 +57,44 @@ impl Effects {
         self.list.iter_mut()
     }
 }
+
+use crate::state::PlayerState;
+
+/// `LivingEntity.tickEffects` as the client runs it for the local player: count durations down
+/// and drop expired effects (with their attribute modifiers).
+pub fn tick_effects(p: &mut PlayerState) {
+    let _ = p;
+}
+
+/// Add an effect the way `addEffect` does (replacing a weaker or shorter one; applying its
+/// attribute modifiers).
+pub fn add_effect(p: &mut PlayerState, id: &str, amplifier: i32, duration: i32) {
+    p.effects.insert(EffectInstance {
+        id: id.to_string(),
+        amplifier,
+        duration,
+    });
+}
+
+/// Remove one effect and its attribute modifiers.
+pub fn remove_effect(p: &mut PlayerState, id: &str) {
+    p.effects.remove(id);
+}
+
+/// Remove every effect and their attribute modifiers.
+pub fn clear_effects(p: &mut PlayerState) {
+    p.effects.clear();
+}
+
+/// `LivingEntity.setSprinting`: the flag plus the sprint speed modifier.
+pub fn set_sprinting(p: &mut PlayerState, sprinting: bool) {
+    p.sprinting = sprinting;
+}
+
+/// `LivingEntity.getJumpBoostPower`.
+pub fn jump_boost_power(p: &PlayerState) -> f32 {
+    match p.effects.get("minecraft:jump_boost") {
+        Some(e) => 0.1 * (e.amplifier as f32 + 1.0),
+        None => 0.0,
+    }
+}

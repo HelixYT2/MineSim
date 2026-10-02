@@ -290,6 +290,36 @@ pub fn step(
     (new_pos, new_vel, new_on_ground)
 }
 
+/// One client tick of the local player: everything the game does to it between the start and the
+/// end of a client tick (`LocalPlayer.tick` and the `Player`/`LivingEntity`/`Entity` chain under
+/// it), driven by `input`. This is the kernel's entry point.
+pub fn tick(p: &mut crate::state::PlayerState, input: &crate::state::Input, world: &World) {
+    p.yaw = input.yaw;
+    p.pitch = input.pitch;
+    let keys = Keys {
+        forward: input.forward,
+        back: input.back,
+        left: input.left,
+        right: input.right,
+    };
+    let (pos, vel, on_ground) = step(
+        p.pos,
+        p.vel,
+        input.yaw,
+        p.on_ground,
+        p.sprinting || input.sprint,
+        input.shift,
+        keys,
+        input.jump,
+        &mut p.no_jump_delay,
+        world,
+    );
+    p.pos = pos;
+    p.vel = vel;
+    p.on_ground = on_ground;
+    p.tick_count += 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

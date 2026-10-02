@@ -8,6 +8,7 @@ members = [
     "crates/ms-kernel",
     "crates/ms-arena",
     "crates/ms-oracle",
+    "crates/ms-corpus",
     "crates/ms-py",
     "xtask",
 ]
@@ -27,6 +28,7 @@ ms-world = { path = "crates/ms-world" }
 ms-kernel = { path = "crates/ms-kernel" }
 ms-arena = { path = "crates/ms-arena" }
 ms-oracle = { path = "crates/ms-oracle" }
+ms-corpus = { path = "crates/ms-corpus" }
 # External
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rayon = "1"
