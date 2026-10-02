@@ -49,6 +49,11 @@ fn dimensions_for(p: &PlayerState, pose: Pose) -> (f32, f32) {
 /// `Player.canPlayerFitWithinBlocksAndEntitiesWhen`: whether the box of `pose` at the current
 /// position (shrunk by 1e-7) is free of blocks.
 pub fn can_fit_in_pose(p: &PlayerState, world: &World, pose: Pose) -> bool {
+    // The box starts at the feet (plus 1e-7), so with the feet above every block nothing can be in
+    // the way.
+    if collision::clear_above(world, p.pos.y) {
+        return true;
+    }
     let bb = aabb_deflate(bounding_box_at(p.pos, dimensions_for(p, pose)), 1.0E-7);
     collision::no_collision(world, p, bb)
 }
@@ -222,41 +227,46 @@ fn local_player_ai_step(p: &mut PlayerState, world: &World, input: &Input, old_p
     p.shift_key_down = input.shift;
     let forward_impulse = has_forward_impulse(move_vector);
 
-    let mut suffocation = SuffocationCache::new();
-    // if (!noPhysics) moveTowardsClosestSpace at the four corners of the box (0.35 of the width)
-    let width = f64::from(p.dimensions().0);
-    let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(
-        p,
-        world,
-        &mut suffocation,
-        px - width * 0.35,
-        pz + width * 0.35,
-    );
-    let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(
-        p,
-        world,
-        &mut suffocation,
-        px - width * 0.35,
-        pz - width * 0.35,
-    );
-    let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(
-        p,
-        world,
-        &mut suffocation,
-        px + width * 0.35,
-        pz - width * 0.35,
-    );
-    let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(
-        p,
-        world,
-        &mut suffocation,
-        px + width * 0.35,
-        pz + width * 0.35,
-    );
+    // if (!noPhysics) moveTowardsClosestSpace at the four corners of the box (0.35 of the width).
+    // Each corner asks whether a suffocating block overlaps the column box above its block, which
+    // starts at the feet (plus 1e-7); with the feet above every block the answer is no for all four
+    // and the velocity is left alone, so the checks are skipped.
+    if !collision::clear_of_suffocating_above(world, p.pos.y) {
+        let mut suffocation = SuffocationCache::new();
+        let width = f64::from(p.dimensions().0);
+        let (px, pz) = (p.pos.x, p.pos.z);
+        move_towards_closest_space(
+            p,
+            world,
+            &mut suffocation,
+            px - width * 0.35,
+            pz + width * 0.35,
+        );
+        let (px, pz) = (p.pos.x, p.pos.z);
+        move_towards_closest_space(
+            p,
+            world,
+            &mut suffocation,
+            px - width * 0.35,
+            pz - width * 0.35,
+        );
+        let (px, pz) = (p.pos.x, p.pos.z);
+        move_towards_closest_space(
+            p,
+            world,
+            &mut suffocation,
+            px + width * 0.35,
+            pz - width * 0.35,
+        );
+        let (px, pz) = (p.pos.x, p.pos.z);
+        move_towards_closest_space(
+            p,
+            world,
+            &mut suffocation,
+            px + width * 0.35,
+            pz + width * 0.35,
+        );
+    }
 
     if was_shift || input.back {
         p.sprint_trigger_time = 0;
@@ -710,6 +720,148 @@ mod tests {
             assert_eq!(run(seed), run(seed));
         }
         let _ = next();
+    }
+
+    /// One game tick as the arena runs it: the client tick of the player, then the server's.
+    fn full_tick(p: &mut PlayerState, input: &Input, world: &World) {
+        use crate::damage::{self, TickStart};
+        let start = TickStart::of(p);
+        tick(p, input, world);
+        damage::server_move_packet(p, &start, world);
+        damage::sync_motion(p);
+        damage::server_do_tick(p, world);
+    }
+
+    /// The world-class shortcuts (no fluid, no fence, no special friction or speed anywhere, nothing
+    /// above some height, ...) must never change a result. A world built only from "plain" blocks
+    /// takes every shortcut; the same world with one block of each kind placed far away (out of
+    /// the player's reach, but flipping every class bit) takes none. The two simulations must stay
+    /// identical, bit for bit, tick after tick.
+    #[test]
+    fn class_shortcuts_do_not_change_the_simulation() {
+        use ms_data::class;
+        use ms_world::{FlatWorld, GridWorld};
+
+        let switches = class::FLUID
+            | class::LARGE_SHAPE
+            | class::MOVING_PISTON
+            | class::SPEED_FACTOR
+            | class::JUMP_FACTOR
+            | class::FRICTION
+            | class::FENCE
+            | class::WALL
+            | class::FENCE_GATE
+            | class::FALL_DAMAGE_RESETTING;
+        let plain: Vec<u32> = (1..ms_data::BLOCK_STATE_COUNT)
+            .filter(|&s| ms_data::state_class(s) & switches == 0)
+            .collect();
+        let parse = |n: &str| ms_data::parse_state(n).unwrap();
+        let stone = parse("minecraft:stone");
+        let decoys = [
+            "minecraft:water",
+            "minecraft:lava",
+            "minecraft:oak_fence",
+            "minecraft:cobblestone_wall",
+            "minecraft:oak_fence_gate",
+            "minecraft:ice",
+            "minecraft:soul_sand",
+            "minecraft:honey_block",
+            "minecraft:moving_piston",
+            "minecraft:powder_snow",
+            "minecraft:bubble_column",
+        ];
+
+        let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut moved = 0usize;
+        for case in 0..90 {
+            let base = match case % 3 {
+                0 => FlatWorld::new(0, stone),
+                1 => FlatWorld::void(),
+                _ => FlatWorld::new(0, parse("minecraft:oak_planks")),
+            };
+            let mut grid = GridWorld::new(base);
+            if case % 3 == 1 {
+                grid.fill((-10, -1, -10), (10, -1, 10), stone);
+            }
+            for _ in 0..(20 + next() % 140) {
+                let (x, y, z) = (
+                    (next() % 17) as i32 - 8,
+                    (next() % 5) as i32 - 1,
+                    (next() % 17) as i32 - 8,
+                );
+                grid.set_block(x, y, z, plain[(next() % plain.len() as u64) as usize]);
+            }
+            let mut decoy_grid = grid.clone();
+            // A random non-empty subset of the decoys, so that worlds with water but no lava (and
+            // so on) take some shortcuts and not others.
+            let mut chosen = 0;
+            for (i, d) in decoys.iter().enumerate() {
+                if next() % 2 == 0 || (i == decoys.len() - 1 && chosen == 0) {
+                    decoy_grid.set_block(5000 + 3 * i as i32, 0, 5000, parse(d));
+                    chosen += 1;
+                }
+            }
+            // Raises the highest block far above the player.
+            decoy_grid.set_block(-5000, 400, 5000, stone);
+            let (plain_world, decoy_world) = (World::grid(grid), World::grid(decoy_grid));
+            assert_eq!(plain_world.classes() & switches, 0, "case {case}");
+            assert!(plain_world.max_block_y() < 10, "case {case}");
+            assert_ne!(plain_world.classes(), decoy_world.classes(), "case {case}");
+            assert!(decoy_world.max_block_y() >= 400);
+
+            let start = Vec3::new(
+                (next() % 1200) as f64 / 100.0 - 6.0,
+                [0.0, 0.0, 0.5, 1.0, 3.0, 12.0][(next() % 6) as usize],
+                (next() % 1200) as f64 / 100.0 - 6.0,
+            );
+            let mut a = PlayerState::new(start, 0.0);
+            let mut b = a.clone();
+            let mut input = Input::default();
+            for t in 0..500 {
+                if t % 4 == 0 {
+                    let k = next();
+                    input = Input {
+                        forward: k & 1 != 0,
+                        back: k & 2 != 0 && k & 4 != 0,
+                        left: k & 8 != 0,
+                        right: k & 16 != 0 && k & 32 != 0,
+                        jump: k & 64 != 0,
+                        shift: k & 128 != 0 && k & 256 != 0,
+                        sprint: k & 512 != 0,
+                        yaw: ((k >> 12) % 7200) as f32 / 10.0 - 360.0,
+                        pitch: ((k >> 28) % 1800) as f32 / 10.0 - 90.0,
+                    };
+                }
+                if next() % 90 == 0 {
+                    let id = [
+                        "minecraft:speed",
+                        "minecraft:slowness",
+                        "minecraft:jump_boost",
+                        "minecraft:levitation",
+                        "minecraft:slow_falling",
+                    ][(next() % 5) as usize];
+                    let amplifier = (next() % 3) as i32;
+                    crate::effects::add_effect(&mut a, id, amplifier, 100);
+                    crate::effects::add_effect(&mut b, id, amplifier, 100);
+                }
+                if next() % 150 == 0 {
+                    let (s, dx, dz) = (0.4 + (next() % 100) as f64 / 100.0, 0.3, -0.7);
+                    crate::damage::knockback(&mut a, s, dx, dz);
+                    crate::damage::knockback(&mut b, s, dx, dz);
+                }
+                full_tick(&mut a, &input, &plain_world);
+                full_tick(&mut b, &input, &decoy_world);
+                assert_eq!(a, b, "case {case}, tick {t}");
+            }
+            moved += usize::from(a.pos != start);
+        }
+        assert!(moved > 20);
     }
 
     #[test]

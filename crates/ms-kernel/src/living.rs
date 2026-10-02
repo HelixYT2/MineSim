@@ -265,11 +265,13 @@ fn handle_relative_friction_and_calculate_movement(
 
 /// `LivingEntity.travelInAir`.
 fn travel_in_air(p: &mut PlayerState, world: &World, input: Vec3) {
-    let below = block_pos_below_that_affects_my_movement(p, world);
-    let f: f32 = if p.on_ground {
-        block_friction_at(world, below)
-    } else {
+    let f: f32 = if !p.on_ground {
         1.0
+    } else if !world.may_contain(ms_data::class::FRICTION) {
+        // Every block has the default friction.
+        ms_data::DEFAULT_FRICTION
+    } else {
+        block_friction_at(world, block_pos_below_that_affects_my_movement(p, world))
     };
     let g = f * 0.91_f32;
     let vec32 = handle_relative_friction_and_calculate_movement(p, world, input, f);

@@ -432,9 +432,25 @@ fn update_fluid_height_and_push(
     kind: FluidKind,
     push: f64,
 ) -> (bool, f64) {
+    // A world with no state of this fluid anywhere: every cell below would fail the kind test,
+    // leaving `touching = false`, `depth = 0`, a zero flow and so no push. The result and the
+    // (absent) side effects are the same without the scan.
+    let none_of_this_fluid = match kind {
+        FluidKind::Water => !world.may_contain(ms_data::class::WATER),
+        FluidKind::Lava => !world.may_contain(ms_data::class::LAVA),
+        FluidKind::Empty => false,
+    };
+    if none_of_this_fluid {
+        return (false, 0.0);
+    }
     let bb = deflate(bounding_box(p), 0.001);
     let (i, j) = (mth_floor(bb.min.x), mth_ceil(bb.max.x));
-    let (k, l) = (mth_floor(bb.min.y), mth_ceil(bb.max.y));
+    // Cells above the world's highest block are air and hold no fluid.
+    let mut l = mth_ceil(bb.max.y);
+    if kind != FluidKind::Empty {
+        l = l.min(world.max_block_y().saturating_add(1));
+    }
+    let k = mth_floor(bb.min.y);
     let (m, n) = (mth_floor(bb.min.z), mth_ceil(bb.max.z));
     let mut depth = 0.0_f64;
     let pushed = is_pushed_by_fluid(p);
@@ -510,6 +526,12 @@ pub fn update_in_fluid_state_and_push(p: &mut PlayerState, world: &World) {
     // `fluidHeight.clear()`
     p.water_height = 0.0;
     p.lava_height = 0.0;
+    // Without any fluid in the world both scans below find nothing: not touching, depth 0.
+    if !world.may_contain(ms_data::class::FLUID) {
+        p.in_water = false;
+        p.in_lava = false;
+        return;
+    }
     update_in_water_state_and_push(p, world);
     let (_touching, depth) = update_fluid_height_and_push(p, world, FluidKind::Lava, LAVA_PUSH);
     p.lava_height = depth;
@@ -525,6 +547,10 @@ pub fn update_in_fluid_state_and_push(p: &mut PlayerState, world: &World) {
 pub fn update_fluid_on_eyes(p: &mut PlayerState, world: &World) {
     p.eye_in_water = p.water_on_eyes;
     p.water_on_eyes = false;
+    // Without any water in the world the eye is never in it and nothing more happens.
+    if !world.may_contain(ms_data::class::WATER) {
+        return;
+    }
     let d = p.pos.y + f64::from(p.eye_height());
     let (bx, by, bz) = (mth_floor(p.pos.x), mth_floor(d), mth_floor(p.pos.z));
     let f = fluid_at(world, bx, by, bz);

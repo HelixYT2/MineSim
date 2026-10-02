@@ -79,7 +79,8 @@ fn main() -> ExitCode {
             let a: Vec<String> = std::env::args().skip(2).collect();
             let envs = a.first().and_then(|s| s.parse().ok()).unwrap_or(4096usize);
             let ticks = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000usize);
-            bench(envs, ticks);
+            let reps = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5usize);
+            bench(envs, ticks, reps.max(1));
             ExitCode::SUCCESS
         }
         other => {
@@ -630,76 +631,88 @@ fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Measures stepping throughput on flat terrain with a sprint-jump workload: one env, the whole
-/// batch on a single thread, and the whole batch across the rayon pool. Build with `--release`;
-/// debug numbers are not representative.
-fn bench(envs: usize, ticks: usize) {
+/// Measures stepping throughput on flat terrain: one env, the whole batch on a single thread, and
+/// the whole batch across the rayon pool, for a sprint-jump workload (mostly airborne, a landing
+/// every dozen ticks) and a sprint-walk one (on the ground every tick). Each figure is the best of
+/// `reps` repetitions, which keeps a noisy machine from showing as a slow kernel. Build with
+/// `--release`; debug numbers are not representative.
+fn bench(envs: usize, ticks: usize, reps: usize) {
     use ms_arena::{Action, Arena, BatchArena};
     use ms_numerics::Vec3;
     use ms_world::World;
     use std::time::Instant;
 
     let make = |i: usize| Arena::new(World::flat(0), Vec3::new(0.5, 0.0, 0.5), (i % 360) as f32);
-    let actions: Vec<Action> = (0..envs)
-        .map(|i| Action {
-            forward: true,
-            jump: true,
-            sprint: true,
-            yaw: (i % 360) as f32,
-            ..Action::default()
-        })
-        .collect();
+    let actions = |jump: bool| -> Vec<Action> {
+        (0..envs)
+            .map(|i| Action {
+                forward: true,
+                jump,
+                sprint: true,
+                yaw: (i % 360) as f32,
+                ..Action::default()
+            })
+            .collect()
+    };
 
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    println!("MineSim throughput  (flat world, sprint+jump)");
-    println!("  envs={envs}  ticks={ticks}  hardware-threads={threads}\n");
+    println!("MineSim throughput  (flat world; best of {reps})");
+    println!("  envs={envs}  ticks={ticks}  hardware-threads={threads}");
 
-    {
+    // A single env is cheap, so it gets enough ticks to time reliably whatever `ticks` is.
+    let single_ticks = ticks.max(50_000);
+    for (name, jump) in [("sprint+jump", true), ("sprint+walk", false)] {
+        let acts = actions(jump);
+        println!("\n  workload: {name}");
+
         let mut one = BatchArena::from_fn(1, make);
-        let act = actions[..1].to_vec();
+        let act = acts[..1].to_vec();
         for _ in 0..100 {
             one.step_serial(&act);
         }
-        let t = Instant::now();
-        for _ in 0..ticks {
-            one.step_serial(&act);
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            for _ in 0..single_ticks {
+                one.step_serial(&act);
+            }
+            best = best.min(t.elapsed().as_secs_f64());
         }
-        report(
-            "single arena  (1 env, 1 thread)",
-            ticks,
-            t.elapsed().as_secs_f64(),
+        report("single arena  (1 env, 1 thread)", single_ticks, best);
+
+        let mut b = BatchArena::from_fn(envs, make);
+        for _ in 0..10 {
+            b.step_serial(&acts);
+        }
+        let mut best_serial = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            for _ in 0..ticks {
+                b.step_serial(&acts);
+            }
+            best_serial = best_serial.min(t.elapsed().as_secs_f64());
+        }
+        report("batch serial  (1 thread)       ", envs * ticks, best_serial);
+
+        let mut b = BatchArena::from_fn(envs, make);
+        for _ in 0..10 {
+            b.step(&acts);
+        }
+        let mut best_par = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            for _ in 0..ticks {
+                b.step(&acts);
+            }
+            best_par = best_par.min(t.elapsed().as_secs_f64());
+        }
+        report("batch parallel (rayon)         ", envs * ticks, best_par);
+        println!(
+            "  parallel speedup over serial: {:.1}x",
+            best_serial / best_par
         );
-    }
-
-    let serial_rate = {
-        let mut b = BatchArena::from_fn(envs, make);
-        for _ in 0..10 {
-            b.step_serial(&actions);
-        }
-        let t = Instant::now();
-        for _ in 0..ticks {
-            b.step_serial(&actions);
-        }
-        let secs = t.elapsed().as_secs_f64();
-        report("batch serial  (1 thread)       ", envs * ticks, secs);
-        (envs * ticks) as f64 / secs
-    };
-
-    {
-        let mut b = BatchArena::from_fn(envs, make);
-        for _ in 0..10 {
-            b.step(&actions);
-        }
-        let t = Instant::now();
-        for _ in 0..ticks {
-            b.step(&actions);
-        }
-        let secs = t.elapsed().as_secs_f64();
-        let rate = (envs * ticks) as f64 / secs;
-        report("batch parallel (rayon)         ", envs * ticks, secs);
-        println!("  parallel speedup over serial: {:.1}x", rate / serial_rate);
     }
 }
 

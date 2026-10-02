@@ -15,8 +15,13 @@
 //! * `Entity.collide`: axis order (Y, then the larger horizontal axis), the step-up search with the
 //!   candidate heights taken from the shapes' Y coordinates, and the extra `-1.0E-5F` region.
 //!
-//! Collision boxes come from [`crate::blocks::collision_boxes`] (entity-dependent shapes) in
-//! block-local coordinates; this module places them in the world and does the rest.
+//! Collision boxes are in block-local coordinates; this module places them in the world and does
+//! the rest. A block whose shape depends on who asks or where it is (scaffolding, powder snow: the
+//! `ms_data::class::CONTEXT_SHAPE` class) gets them from [`crate::blocks::collision_boxes`]; every
+//! other block's boxes are the table's (`ms_data::collision_boxes`), which is what that function
+//! returns for them too, so they are read straight from the table instead of being copied into a
+//! fresh `Vec` per block per query (see the test `context_free_blocks_need_no_block_module`, which
+//! fails if the block module starts treating another block specially without giving it the class).
 
 // The comparisons mirror the reference's `!(a <= b)` forms, which differ from `a > b` for NaN.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
@@ -34,8 +39,23 @@ pub const EPSILON: f64 = 1.0E-7;
 // ---------------------------------------------------------------------------------------------
 
 /// `Math.min(double, double)` (NaN-propagating, `-0.0 < 0.0`).
-#[inline]
+///
+/// Two ordered operands, the overwhelmingly common case, are decided by one comparison; the
+/// reference's special cases (NaN, equal values, the zeros) only arise when neither `a < b` nor
+/// `a > b` holds, and go through [`jmin_edge`], the reference's own sequence of tests.
+#[inline(always)]
 pub fn jmin(a: f64, b: f64) -> f64 {
+    if a < b {
+        a
+    } else if a > b {
+        b
+    } else {
+        jmin_edge(a, b)
+    }
+}
+
+#[inline(never)]
+fn jmin_edge(a: f64, b: f64) -> f64 {
     if a.is_nan() {
         return a;
     }
@@ -49,9 +69,20 @@ pub fn jmin(a: f64, b: f64) -> f64 {
     }
 }
 
-/// `Math.max(double, double)` (NaN-propagating, `-0.0 < 0.0`).
-#[inline]
+/// `Math.max(double, double)` (NaN-propagating, `-0.0 < 0.0`); see [`jmin`].
+#[inline(always)]
 pub fn jmax(a: f64, b: f64) -> f64 {
+    if a > b {
+        a
+    } else if a < b {
+        b
+    } else {
+        jmax_edge(a, b)
+    }
+}
+
+#[inline(never)]
+fn jmax_edge(a: f64, b: f64) -> f64 {
     if a.is_nan() {
         return a;
     }
@@ -300,6 +331,86 @@ fn voxel_collide(v: &impl Vox, axis: usize, bb: Aabb, mut d: f64) -> f64 {
     d
 }
 
+/// [`voxel_collide`] for a shape that is one filled cell (`[min, max]` on each axis), worked out
+/// without the binary searches: with two coordinates per axis `findIndex` can only answer -1, 0 or
+/// 1, there is a single cell, and the layer scans reduce to one test of whether that cell lies in
+/// the window of the box on the two other axes. Same results bit for bit (checked against the
+/// general routine in the tests).
+fn single_collide(min: &[f64; 3], max: &[f64; 3], axis: usize, bb: Aabb, d: f64) -> f64 {
+    match axis {
+        0 => single_collide_on::<0, 1, 2>(min, max, bb, d),
+        1 => single_collide_on::<1, 2, 0>(min, max, bb, d),
+        _ => single_collide_on::<2, 0, 1>(min, max, bb, d),
+    }
+}
+
+/// Component `A` (0 = x, 1 = y, 2 = z) of a vector, resolved at compile time.
+#[inline(always)]
+fn component<const A: usize>(v: Vec3) -> f64 {
+    match A {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+/// [`single_collide`] for the axis `A`, with `B` and `C` the other two in `voxel_collide`'s order.
+#[inline(always)]
+fn single_collide_on<const A: usize, const B: usize, const C: usize>(
+    min: &[f64; 3],
+    max: &[f64; 3],
+    bb: Aabb,
+    mut d: f64,
+) -> f64 {
+    if d.abs() < EPSILON {
+        return 0.0;
+    }
+    // `findIndex` over the two coordinates `[lo, hi]`: the index of the last one `<= v`.
+    let find = |lo: f64, hi: f64, v: f64| -> i64 {
+        if !(v < hi) {
+            1
+        } else if v < lo {
+            -1
+        } else {
+            0
+        }
+    };
+    // Does the cell lie in the box's window (shrunk by 1e-7) on the two other axes? Only then can
+    // it stop the move.
+    let (b_lo, b_hi) = (min[B], max[B]);
+    let k = find(b_lo, b_hi, component::<B>(bb.min) + EPSILON).max(0);
+    let l = 1.min(find(b_lo, b_hi, component::<B>(bb.max) - EPSILON) + 1);
+    let (c_lo, c_hi) = (min[C], max[C]);
+    let m = find(c_lo, c_hi, component::<C>(bb.min) + EPSILON).max(0);
+    let n = 1.min(find(c_lo, c_hi, component::<C>(bb.max) - EPSILON) + 1);
+    if !(k < l && m < n) {
+        return d;
+    }
+    let (a_lo, a_hi) = (min[A], max[A]);
+    if d > 0.0 {
+        // The scan starts at layer `j + 1`, where `j` is the index of the box's far face; the only
+        // layer is 0.
+        let e = component::<A>(bb.max);
+        if find(a_lo, a_hi, e - EPSILON) == -1 {
+            let g = a_lo - e;
+            if g >= -EPSILON {
+                d = jmin(d, g);
+            }
+        }
+    } else if d < 0.0 {
+        // The scan starts at layer `i - 1`, where `i` is the index of the box's near face; the only
+        // layer is 0.
+        let f = component::<A>(bb.min);
+        if find(a_lo, a_hi, f + EPSILON) == 1 {
+            let g = a_hi - f;
+            if g <= EPSILON {
+                d = jmax(d, g);
+            }
+        }
+    }
+    d
+}
+
 /// A collision shape placed in the world: one filled box, or a grid built from several.
 #[derive(Clone, Debug)]
 pub struct Shape {
@@ -426,7 +537,10 @@ impl Shape {
 
     /// `VoxelShape.collide(axis, box, d)` for axis `0..3`.
     pub fn collide(&self, axis: usize, bb: Aabb, d: f64) -> f64 {
-        voxel_collide(self, axis, bb, d)
+        match &self.repr {
+            Repr::Single { min, max } => single_collide(min, max, axis, bb, d),
+            Repr::Grid { .. } => voxel_collide(self, axis, bb, d),
+        }
     }
 
     /// The Y coordinates of the shape's grid, ascending (`getCoords(Axis.Y)`).
@@ -545,52 +659,227 @@ pub struct BlockCollision {
     pub shape: Shape,
 }
 
-/// Whether the context-free collision shape extends outside the unit cube (`hasLargeCollisionShape`),
-/// tabulated once for every block state.
-fn has_large_collision_shape(state: u32) -> bool {
-    static LARGE: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
-    let table = LARGE.get_or_init(|| {
-        (0..ms_data::BLOCK_STATE_COUNT)
-            .map(|s| {
-                ms_data::collision_boxes(s)
-                    .iter()
-                    .any(|b| (0..3).any(|a| b[a] < 0.0 || b[a + 3] > 1.0))
-            })
-            .collect()
-    });
-    table[state as usize]
-}
-
 /// Whether a box list is exactly the unit cube (the game's `Shapes.block()`).
 fn is_full_cube(boxes: &[[f64; 6]]) -> bool {
     matches!(boxes, [b] if *b == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
 }
 
+/// A block whose collision shape intersects the query of [`gather`].
+struct Hit<'a> {
+    pos: (i32, i32, i32),
+    /// The block's boxes in block-local coordinates (never empty).
+    boxes: &'a [[f64; 6]],
+    /// The shape placed in the world, when it had to be built to decide the hit (every shape
+    /// but the full cube; boxed to keep a hit small); the sink builds it itself otherwise.
+    shape: Option<Box<Shape>>,
+}
+
+impl Hit<'_> {
+    /// The hit as the collision resolution keeps it: a plain cube is just its cell (every solid
+    /// block of a typical floor), anything else its placed shape.
+    fn into_piece(self) -> Piece {
+        match self.shape {
+            None => Piece::Cube([self.pos.0, self.pos.1, self.pos.2]),
+            Some(shape) => Piece::Shape(shape),
+        }
+    }
+
+    fn into_collision(self) -> BlockCollision {
+        let (x, y, z) = self.pos;
+        let shape = match self.shape {
+            Some(shape) => *shape,
+            None => Shape::from_boxes(self.boxes, x, y, z).expect("non-empty"),
+        };
+        BlockCollision {
+            pos: self.pos,
+            shape,
+        }
+    }
+}
+
+/// Whether every block-collision query whose box starts at height `y` or higher is certain to
+/// find nothing: the world holds no block that reaches up to `y` (everything at or above
+/// `max_block_y + 1` is air), and none of the blocks the cursor's outer ring would admit (a
+/// shape larger than a cube, a moving piston), which could reach up from below the box's own
+/// cells. A NaN height is never clear.
+///
+/// A query box starting at `y` has its lowest cell at `floor(y)` and no cell intersecting it lies
+/// lower, so with `y >= max_block_y + 1` the cells it could intersect are all air.
+#[inline]
+pub fn clear_above(world: &World, y: f64) -> bool {
+    y >= f64::from(world.max_block_y()) + 1.0 && !world.may_contain(ms_data::class::RING_RELEVANT)
+}
+
+/// [`clear_above`] for the suffocation queries, which only look at suffocating blocks (full cubes,
+/// so the ring never matters for them).
+#[inline]
+pub fn clear_of_suffocating_above(world: &World, y: f64) -> bool {
+    y >= f64::from(world.max_block_y()) + 1.0
+        && !world.may_contain(ms_data::class::SUFFOCATING_RING_RELEVANT)
+}
+
 /// `BlockCollisions`: every block collision shape intersecting `query`, in the game's iteration
 /// order. `p`/`ctx_bb` give the entity the shapes are queried for (scaffolding, powder snow).
-/// With `only_suffocating`, only suffocating blocks are considered.
+/// With `only_suffocating`, only suffocating blocks are considered. The sink returns whether to
+/// keep going.
+///
+/// The reference walks a cursor over the cells around `query`; the cells on its outer ring
+/// ("kind" 1 or 2: one or two coordinates on the boundary) only matter for blocks with a shape
+/// larger than a cube, or a moving piston, and the corners (kind 3) never do. When the world is
+/// known to hold no such block (`ms_data::class::RING_RELEVANT` clear in its class union), every
+/// ring cell is skipped whatever it holds, and an inner cell that does not intersect the query is
+/// skipped too (its shape stays within the cell). The walk then only visits the inner cells that
+/// can intersect the query, in the same order; the visited cells that matter are exactly the ones
+/// the full walk would have reported.
 fn gather(
     world: &World,
     p: &PlayerState,
     ctx_bb: Aabb,
     query: Aabb,
     only_suffocating: bool,
-    mut sink: impl FnMut(BlockCollision) -> bool,
+    mut sink: impl FnMut(Hit<'_>) -> bool,
 ) {
-    let x0 = floor(query.min.x - EPSILON) - 1;
-    let x1 = floor(query.max.x + EPSILON) + 1;
-    let y0 = floor(query.min.y - EPSILON) - 1;
-    let y1 = floor(query.max.y + EPSILON) + 1;
-    let z0 = floor(query.min.z - EPSILON) - 1;
-    let z1 = floor(query.max.z + EPSILON) + 1;
-    // Everything above a flat world's floor is air: those rows need not be visited.
-    let y_last = match world {
-        World::Flat(f) => y1.min(f.surface_y().saturating_sub(1)),
-        _ => y1,
+    // Suffocating blocks are full cubes, so for the suffocation queries the ring never matters.
+    let ring_mask = if only_suffocating {
+        ms_data::class::SUFFOCATING_RING_RELEVANT
+    } else {
+        ms_data::class::RING_RELEVANT
     };
-    for z in z0..z1 + 1 {
+    let ring_inert = !world.may_contain(ring_mask);
+    // Everything above the world's highest block is air: those rows need not be visited, and a
+    // query lying wholly above them intersects nothing (see `clear_above`).
+    let max_y = world.max_block_y();
+    if ring_inert && query.min.y >= f64::from(max_y) + 1.0 {
+        return;
+    }
+
+    // The block at one cell, decided against the query; false stops the walk.
+    let mut visit = |x: i32, y: i32, z: i32, kind: i32| -> bool {
+        let state = world.block_state(x, y, z);
+        if state == ms_data::AIR {
+            return true;
+        }
+        if only_suffocating && !ms_data::is_suffocating(state) {
+            return true;
+        }
+        let classes = ms_data::state_class(state);
+        let large = classes & ms_data::class::LARGE_SHAPE != 0;
+        if kind == 1 && !large {
+            return true;
+        }
+        if kind == 2 && classes & ms_data::class::MOVING_PISTON == 0 {
+            return true;
+        }
+        // A shape that stays inside its own cell cannot overlap a query that does not even
+        // intersect the cell, so the shape lookup is skipped for those (every solid block of
+        // the floor row, typically); only oversized shapes (fences, walls) need it.
+        let cell_hit = aabb_intersects(
+            query,
+            f64::from(x),
+            f64::from(y),
+            f64::from(z),
+            f64::from(x) + 1.0,
+            f64::from(y) + 1.0,
+            f64::from(z) + 1.0,
+        );
+        if kind == 0 && !large && !cell_hit {
+            return true;
+        }
+        let entity_boxes;
+        let boxes: &[[f64; 6]] = if classes & ms_data::class::CONTEXT_SHAPE == 0 {
+            ms_data::collision_boxes(state)
+        } else {
+            entity_boxes = crate::blocks::collision_boxes(p, ctx_bb, world, x, y, z);
+            &entity_boxes
+        };
+        if boxes.is_empty() {
+            return true;
+        }
+        let (hit, shape) = if is_full_cube(boxes) {
+            // `voxelShape == Shapes.block()`: plain strict intersection with the cell.
+            (cell_hit, None)
+        } else {
+            let shape = Shape::from_boxes(boxes, x, y, z).expect("non-empty");
+            (shape_overlaps_box(&shape, query), Some(Box::new(shape)))
+        };
+        !hit || sink(Hit {
+            pos: (x, y, z),
+            boxes,
+            shape,
+        })
+    };
+
+    // Far from the origin the reference's own cell arithmetic overflows; such queries always take
+    // the general walk.
+    const SAFE: i32 = 1 << 30;
+    let in_range = |v: i32| v > -SAFE && v < SAFE;
+
+    // The cells that can intersect the query: `floor(min) <= x <= floor(max)` on each axis (a
+    // cell intersects only if its far face is beyond `min` and its near face before `max`). This
+    // range lies inside the walk's inner cells (x0 < x < x1, ...), since
+    // `floor(min - EPSILON) <= floor(min)` and `floor(max) <= floor(max + EPSILON)`.
+    let (xlo, xhi) = (floor(query.min.x), floor(query.max.x));
+    let (ylo, yhi) = (floor(query.min.y), floor(query.max.y));
+    let (zlo, zhi) = (floor(query.min.z), floor(query.max.z));
+    let narrow_in_range = in_range(xlo)
+        && in_range(xhi)
+        && in_range(ylo)
+        && in_range(yhi)
+        && in_range(zlo)
+        && in_range(zhi);
+
+    if ring_inert && narrow_in_range {
+        // The ring holds nothing anywhere in this world: visit only the cells that can intersect.
+        for z in zlo..=zhi {
+            for y in ylo..=yhi.min(max_y) {
+                for x in xlo..=xhi {
+                    if !visit(x, y, z, 0) {
+                        return;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // The cells the reference walks: `x0..=x1` and so on, the box around the query's cells plus a
+    // one-cell margin whose outer shell is the "ring".
+    let fx0 = floor(query.min.x - EPSILON);
+    let fx1 = floor(query.max.x + EPSILON);
+    let fy0 = floor(query.min.y - EPSILON);
+    let fy1 = floor(query.max.y + EPSILON);
+    let fz0 = floor(query.min.z - EPSILON);
+    let fz1 = floor(query.max.z + EPSILON);
+    let (x0, x1) = (fx0.wrapping_sub(1), fx1.wrapping_add(1));
+    let (y0, y1) = (fy0.wrapping_sub(1), fy1.wrapping_add(1));
+    let (z0, z1) = (fz0.wrapping_sub(1), fz1.wrapping_add(1));
+    // A world that does hold blocks the ring would look at may still hold none in this walk's box,
+    // which makes the ring just as inert.
+    if narrow_in_range
+        && in_range(fx0)
+        && in_range(fx1)
+        && in_range(fy0)
+        && in_range(fy1)
+        && in_range(fz0)
+        && in_range(fz1)
+        && !world.ring_relevant_in([x0, y0, z0], [x1, y1, z1])
+    {
+        for z in zlo..=zhi {
+            for y in ylo..=yhi.min(max_y) {
+                for x in xlo..=xhi {
+                    if !visit(x, y, z, 0) {
+                        return;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let y_last = y1.min(max_y);
+    for z in z0..z1.wrapping_add(1) {
         for y in y0..y_last.saturating_add(1) {
-            for x in x0..x1 + 1 {
+            for x in x0..x1.wrapping_add(1) {
                 // Cursor3D type: how many coordinates are on the outer ring.
                 let kind = i32::from(x == x0 || x == x1)
                     + i32::from(y == y0 || y == y1)
@@ -598,64 +887,7 @@ fn gather(
                 if kind == 3 {
                     continue;
                 }
-                let state = world.block_state(x, y, z);
-                if state == ms_data::AIR {
-                    continue;
-                }
-                if only_suffocating && !ms_data::is_suffocating(state) {
-                    continue;
-                }
-                if kind == 1 && !has_large_collision_shape(state) {
-                    continue;
-                }
-                if kind == 2
-                    && ms_data::block_name(ms_data::block_of_state(state))
-                        != "minecraft:moving_piston"
-                {
-                    continue;
-                }
-                // A shape that stays inside its own cell cannot overlap a query that does not even
-                // intersect the cell, so the shape lookup is skipped for those (every solid block of
-                // the floor row, typically); only oversized shapes (fences, walls) need it.
-                if kind == 0
-                    && !has_large_collision_shape(state)
-                    && !aabb_intersects(
-                        query,
-                        f64::from(x),
-                        f64::from(y),
-                        f64::from(z),
-                        f64::from(x) + 1.0,
-                        f64::from(y) + 1.0,
-                        f64::from(z) + 1.0,
-                    )
-                {
-                    continue;
-                }
-                let boxes = crate::blocks::collision_boxes(p, ctx_bb, world, x, y, z);
-                if boxes.is_empty() {
-                    continue;
-                }
-                let shape = Shape::from_boxes(&boxes, x, y, z).expect("non-empty");
-                let hit = if is_full_cube(&boxes) {
-                    // `voxelShape == Shapes.block()`: plain strict intersection with the cell.
-                    aabb_intersects(
-                        query,
-                        f64::from(x),
-                        f64::from(y),
-                        f64::from(z),
-                        f64::from(x) + 1.0,
-                        f64::from(y) + 1.0,
-                        f64::from(z) + 1.0,
-                    )
-                } else {
-                    shape_overlaps_box(&shape, query)
-                };
-                if hit
-                    && !sink(BlockCollision {
-                        pos: (x, y, z),
-                        shape,
-                    })
-                {
+                if !visit(x, y, z, kind) {
                     return;
                 }
             }
@@ -671,8 +903,8 @@ pub fn block_collisions(
     query: Aabb,
 ) -> Vec<BlockCollision> {
     let mut out = Vec::new();
-    gather(world, p, ctx_bb, query, false, |c| {
-        out.push(c);
+    gather(world, p, ctx_bb, query, false, |h| {
+        out.push(h.into_collision());
         true
     });
     out
@@ -760,19 +992,135 @@ fn axis_step_order(motion: Vec3) -> [usize; 3] {
     }
 }
 
-/// `Shapes.collide(axis, box, shapes, d)`.
-fn shapes_collide(axis: usize, bb: Aabb, shapes: &[BlockCollision], mut d: f64) -> f64 {
-    for s in shapes {
-        if d.abs() < EPSILON {
-            return 0.0;
+/// One colliding block as `Entity.collide` keeps it while resolving a move: a full cube is just
+/// its cell (the shape it stands for is the unit box at that position), any other shape is boxed.
+enum Piece {
+    Cube([i32; 3]),
+    Shape(Box<Shape>),
+}
+
+impl Piece {
+    /// `VoxelShape.collide(axis, box, d)` of the piece's shape.
+    #[inline]
+    fn collide(&self, axis: usize, bb: Aabb, d: f64) -> f64 {
+        match self {
+            Piece::Cube(c) => {
+                // The shape `Shape::from_boxes` makes of the unit cube at this cell.
+                let min = [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])];
+                let max = [min[0] + 1.0, min[1] + 1.0, min[2] + 1.0];
+                single_collide(&min, &max, axis, bb, d)
+            }
+            Piece::Shape(s) => s.collide(axis, bb, d),
         }
-        d = s.shape.collide(axis, bb, d);
     }
-    d
+
+    /// The Y coordinates of the piece's shape, ascending (`getCoords(Axis.Y)`), fed to `f` until it
+    /// returns false.
+    fn for_each_y(&self, mut f: impl FnMut(f64) -> bool) {
+        match self {
+            Piece::Cube(c) => {
+                let y = f64::from(c[1]);
+                if f(y) {
+                    f(y + 1.0);
+                }
+            }
+            Piece::Shape(s) => {
+                for d in s.y_coords() {
+                    if !f(d) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The blocks found by one query, in order, without touching the heap unless there are more than
+/// a handful of them.
+struct Pieces {
+    inline: [Piece; 8],
+    len: usize,
+    spill: Vec<Piece>,
+}
+
+impl Pieces {
+    fn new() -> Self {
+        Pieces {
+            inline: std::array::from_fn(|_| Piece::Cube([0; 3])),
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, piece: Piece) {
+        if self.len < self.inline.len() {
+            self.inline[self.len] = piece;
+            self.len += 1;
+        } else {
+            self.spill.push(piece);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Piece> {
+        self.inline[..self.len].iter().chain(self.spill.iter())
+    }
+
+    /// Everything block `gather` reports for `query`.
+    fn gather(world: &World, p: &PlayerState, ctx_bb: Aabb, query: Aabb) -> Pieces {
+        let mut pieces = Pieces::new();
+        gather(world, p, ctx_bb, query, false, |h| {
+            pieces.push(h.into_piece());
+            true
+        });
+        pieces
+    }
+}
+
+/// A set of shapes that `Entity.collideWithShapes` can resolve a move against.
+trait ShapeSet {
+    fn is_empty(&self) -> bool;
+    /// `Shapes.collide(axis, box, shapes, d)`.
+    fn collide_axis(&self, axis: usize, bb: Aabb, d: f64) -> f64;
+}
+
+impl ShapeSet for [BlockCollision] {
+    fn is_empty(&self) -> bool {
+        <[BlockCollision]>::is_empty(self)
+    }
+
+    fn collide_axis(&self, axis: usize, bb: Aabb, mut d: f64) -> f64 {
+        for s in self {
+            if d.abs() < EPSILON {
+                return 0.0;
+            }
+            d = s.shape.collide(axis, bb, d);
+        }
+        d
+    }
+}
+
+impl ShapeSet for Pieces {
+    fn is_empty(&self) -> bool {
+        Pieces::is_empty(self)
+    }
+
+    fn collide_axis(&self, axis: usize, bb: Aabb, mut d: f64) -> f64 {
+        for s in self.iter() {
+            if d.abs() < EPSILON {
+                return 0.0;
+            }
+            d = s.collide(axis, bb, d);
+        }
+        d
+    }
 }
 
 /// `Entity.collideWithShapes`.
-pub fn collide_with_shapes_list(motion: Vec3, bb: Aabb, shapes: &[BlockCollision]) -> Vec3 {
+fn collide_with<S: ShapeSet + ?Sized>(motion: Vec3, bb: Aabb, shapes: &S) -> Vec3 {
     if shapes.is_empty() {
         return motion;
     }
@@ -781,11 +1129,16 @@ pub fn collide_with_shapes_list(motion: Vec3, bb: Aabb, shapes: &[BlockCollision
         let d = get(motion, axis);
         if d != 0.0 {
             let moved = aabb_move(bb, result.x, result.y, result.z);
-            let e = shapes_collide(axis, moved, shapes, d);
+            let e = shapes.collide_axis(axis, moved, d);
             result = with(result, axis, e);
         }
     }
     result
+}
+
+/// `Entity.collideWithShapes`.
+pub fn collide_with_shapes_list(motion: Vec3, bb: Aabb, shapes: &[BlockCollision]) -> Vec3 {
+    collide_with(motion, bb, shapes)
 }
 
 /// `Entity.collideWithShapes` over plain boxes (each a one-box shape).
@@ -802,25 +1155,21 @@ pub fn collide_with_shapes(motion: Vec3, bb: Aabb, colliders: &[Aabb]) -> Vec3 {
 
 /// `Entity.collectCandidateStepUpHeights`: the distinct heights (floats, relative to the box
 /// bottom) of the shapes' Y coordinates within reach, sorted ascending.
-fn candidate_step_up_heights(
-    bb: Aabb,
-    shapes: &[BlockCollision],
-    max_up: f32,
-    current: f32,
-) -> Vec<f32> {
+fn candidate_step_up_heights(bb: Aabb, shapes: &Pieces, max_up: f32, current: f32) -> Vec<f32> {
     let mut heights: Vec<f32> = Vec::new();
-    for s in shapes {
-        for d in s.shape.y_coords() {
+    for s in shapes.iter() {
+        s.for_each_y(|d| {
             let h = (d - bb.min.y) as f32;
             if !(h < 0.0) && h != current {
                 if h > max_up {
-                    break;
+                    return false;
                 }
                 if !heights.contains(&h) {
                     heights.push(h);
                 }
             }
-        }
+            true
+        });
     }
     heights.sort_by(f32::total_cmp);
     heights
@@ -844,12 +1193,20 @@ pub fn collide_at(
     step_height: f32,
 ) -> Vec3 {
     let length_sqr = motion.x * motion.x + motion.y * motion.y + motion.z * motion.z;
-    let collided = if length_sqr == 0.0 {
+    // The lowest point of the query box (`bb` grown towards `motion`): the world is checked
+    // against that height before the box is even built.
+    let query_low = if motion.y < 0.0 {
+        bb.min.y + motion.y
+    } else {
+        bb.min.y
+    };
+    let collided = if length_sqr == 0.0 || clear_above(world, query_low) {
+        // Nothing to collide with (no shapes: `collide_with_shapes_list` returns the motion).
         motion
     } else {
         let query = aabb_expand_towards(bb, motion.x, motion.y, motion.z);
-        let shapes = block_collisions(world, p, bb, query);
-        collide_with_shapes_list(motion, bb, &shapes)
+        let shapes = Pieces::gather(world, p, bb, query);
+        collide_with(motion, bb, &shapes)
     };
     let hit_x = motion.x != collided.x;
     let hit_y = motion.y != collided.y;
@@ -865,13 +1222,12 @@ pub fn collide_at(
         if !hit_down {
             bb3 = aabb_expand_towards(bb3, 0.0, f64::from(-1.0E-5_f32), 0.0);
         }
-        let shapes = block_collisions(world, p, bb, bb3);
+        let shapes = Pieces::gather(world, p, bb, bb3);
         let current = collided.y as f32;
         let heights = candidate_step_up_heights(bb2, &shapes, step_height, current);
         let horizontal_sqr = |v: Vec3| v.x * v.x + v.z * v.z;
         for g in heights {
-            let stepped =
-                collide_with_shapes_list(Vec3::new(motion.x, f64::from(g), motion.z), bb2, &shapes);
+            let stepped = collide_with(Vec3::new(motion.x, f64::from(g), motion.z), bb2, &shapes);
             if horizontal_sqr(stepped) > horizontal_sqr(collided) {
                 let d = bb.min.y - bb2.min.y;
                 return Vec3::new(stepped.x + -0.0, stepped.y + -d, stepped.z + -0.0);
@@ -927,6 +1283,369 @@ mod tests {
         assert_eq!(m.x, 0.5);
     }
 
+    /// `gather` takes the boxes of every block without the `CONTEXT_SHAPE` class straight from the
+    /// table instead of asking the block module. That is only right while the block module returns
+    /// the table's boxes for such blocks whoever asks and wherever they are; if this fails, the
+    /// block module has started to treat some block specially: give that block the
+    /// `ms_data::class::CONTEXT_SHAPE` class (in `ms-data`) so queries keep asking the module.
+    #[test]
+    fn context_free_blocks_need_no_block_module() {
+        use crate::state::Pose;
+        use ms_world::{FlatWorld, GridWorld};
+        use std::sync::Arc;
+
+        let base = PlayerState::new(Vec3::new(0.5, 0.0, 0.5), 0.0);
+        let mut falling = base.clone();
+        falling.fall_distance = 6.0;
+        falling.vel = Vec3::new(0.0, -1.0, 0.0);
+        let mut sneaking = base.clone();
+        sneaking.shift_key_down = true;
+        sneaking.crouching = true;
+        sneaking.pose = Pose::Crouching;
+        let mut powder = base.clone();
+        powder.in_powder_snow = true;
+        powder.was_in_powder_snow = true;
+        powder.pos = Vec3::new(12.3, 40.7, -5.1);
+        let mut grounded = base.clone();
+        grounded.on_ground = true;
+        grounded.sprinting = true;
+        let contexts = [base, falling, sneaking, powder, grounded];
+
+        let positions = [
+            (0, 0, 0),
+            (1, 5, 3),
+            (-7, 64, -2),
+            (100, -30, 250),
+            (-1000, 12, 999),
+            (13, 200, -77),
+            (3, 3, 3),
+            (-1, -1, -1),
+        ];
+        let mut world = World::grid(GridWorld::new(FlatWorld::void()));
+        for state in 1..ms_data::BLOCK_STATE_COUNT {
+            if ms_data::state_class(state) & ms_data::class::CONTEXT_SHAPE != 0 {
+                continue;
+            }
+            let table = ms_data::collision_boxes(state).to_vec();
+            for &(x, y, z) in &positions {
+                let World::Grid(grid) = &mut world else {
+                    unreachable!()
+                };
+                Arc::make_mut(grid).set_block(x, y, z, state);
+                for p in &contexts {
+                    let got = crate::blocks::collision_boxes(p, bounding_box(p), &world, x, y, z);
+                    assert_eq!(
+                        got,
+                        table,
+                        "{} at ({x}, {y}, {z}) for a player at {:?}: the block module returns \
+                         something other than the table's boxes for a block without the \
+                         CONTEXT_SHAPE class",
+                        ms_data::state_to_string(state),
+                        p.pos
+                    );
+                }
+            }
+        }
+    }
+
+    /// `BlockCollisions` exactly as the reference walks it: every cell of the box around the
+    /// query, ring included, with each cell's block looked at (the walk `gather` was before it
+    /// learnt to skip cells that cannot matter). Returns the shapes it reports, in order.
+    fn reference_gather(
+        world: &World,
+        p: &PlayerState,
+        ctx_bb: Aabb,
+        query: Aabb,
+        only_suffocating: bool,
+    ) -> Vec<BlockCollision> {
+        let large = |state: u32| {
+            ms_data::collision_boxes(state)
+                .iter()
+                .any(|b| (0..3).any(|a| b[a] < 0.0 || b[a + 3] > 1.0))
+        };
+        let x0 = floor(query.min.x - EPSILON) - 1;
+        let x1 = floor(query.max.x + EPSILON) + 1;
+        let y0 = floor(query.min.y - EPSILON) - 1;
+        let y1 = floor(query.max.y + EPSILON) + 1;
+        let z0 = floor(query.min.z - EPSILON) - 1;
+        let z1 = floor(query.max.z + EPSILON) + 1;
+        let mut out = Vec::new();
+        for z in z0..z1 + 1 {
+            for y in y0..y1 + 1 {
+                for x in x0..x1 + 1 {
+                    let kind = i32::from(x == x0 || x == x1)
+                        + i32::from(y == y0 || y == y1)
+                        + i32::from(z == z0 || z == z1);
+                    if kind == 3 {
+                        continue;
+                    }
+                    let state = world.block_state(x, y, z);
+                    if state == ms_data::AIR {
+                        continue;
+                    }
+                    if only_suffocating && !ms_data::is_suffocating(state) {
+                        continue;
+                    }
+                    if kind == 1 && !large(state) {
+                        continue;
+                    }
+                    if kind == 2
+                        && ms_data::block_name(ms_data::block_of_state(state))
+                            != "minecraft:moving_piston"
+                    {
+                        continue;
+                    }
+                    let cell_hit = aabb_intersects(
+                        query,
+                        f64::from(x),
+                        f64::from(y),
+                        f64::from(z),
+                        f64::from(x) + 1.0,
+                        f64::from(y) + 1.0,
+                        f64::from(z) + 1.0,
+                    );
+                    if kind == 0 && !large(state) && !cell_hit {
+                        continue;
+                    }
+                    let boxes = crate::blocks::collision_boxes(p, ctx_bb, world, x, y, z);
+                    if boxes.is_empty() {
+                        continue;
+                    }
+                    let shape = Shape::from_boxes(&boxes, x, y, z).expect("non-empty");
+                    let hit = if is_full_cube(&boxes) {
+                        cell_hit
+                    } else {
+                        shape_overlaps_box(&shape, query)
+                    };
+                    if hit {
+                        out.push(BlockCollision {
+                            pos: (x, y, z),
+                            shape,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The walk `gather` does now (with its shortcuts for worlds that cannot hold anything the ring
+    /// would look at, and for queries above every block) reports exactly what the reference walk
+    /// does, on random worlds that do and do not hold such blocks and random query boxes.
+    #[test]
+    fn gather_reports_what_the_full_walk_reports() {
+        use ms_world::{FlatWorld, GridWorld};
+        let mut rng = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let unit = |r: u64| (r >> 11) as f64 / (1u64 << 53) as f64;
+        let all: Vec<u32> = (1..ms_data::BLOCK_STATE_COUNT).collect();
+        let ring = ms_data::class::RING_RELEVANT;
+        let plain: Vec<u32> = all
+            .iter()
+            .copied()
+            .filter(|&s| ms_data::state_class(s) & ring == 0)
+            .collect();
+        let ring_states: Vec<u32> = all
+            .iter()
+            .copied()
+            .filter(|&s| ms_data::state_class(s) & ring != 0)
+            .collect();
+        assert!(!ring_states.is_empty());
+        let player = PlayerState::new(Vec3::new(0.5, 0.0, 0.5), 0.0);
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        let mut compared = 0usize;
+        let mut nonempty = 0usize;
+        for case in 0..300 {
+            let base = match case % 4 {
+                0 => FlatWorld::void(),
+                1 => FlatWorld::new(0, stone),
+                2 => FlatWorld::new(3, stone),
+                _ => FlatWorld::new(0, ms_data::AIR),
+            };
+            let mut grid = GridWorld::new(base);
+            // Most worlds hold only blocks the ring ignores; some also a few it would look at,
+            // near the queries or far from them.
+            let with_ring = case % 3 == 0;
+            for _ in 0..(10 + next() % 120) {
+                let (x, y, z) = (
+                    (next() % 17) as i32 - 8,
+                    (next() % 8) as i32 - 3,
+                    (next() % 17) as i32 - 8,
+                );
+                let pool = if with_ring && next() % 6 == 0 {
+                    &ring_states
+                } else {
+                    &plain
+                };
+                grid.set_block(x, y, z, pool[(next() % pool.len() as u64) as usize]);
+            }
+            if with_ring && case % 2 == 0 {
+                // One far from every query below.
+                grid.set_block(
+                    200,
+                    1,
+                    -200,
+                    ring_states[(next() % ring_states.len() as u64) as usize],
+                );
+            }
+            let world = if case % 5 == 4 {
+                World::Flat(base)
+            } else {
+                World::grid(grid)
+            };
+            for _ in 0..30 {
+                let c = (
+                    unit(next()) * 20.0 - 10.0,
+                    unit(next()) * 8.0 - 3.0,
+                    unit(next()) * 20.0 - 10.0,
+                );
+                let size = (unit(next()) * 3.0, unit(next()) * 3.0, unit(next()) * 3.0);
+                let mut query = aabb(c.0, c.1, c.2, c.0 + size.0, c.1 + size.1, c.2 + size.2);
+                match next() % 12 {
+                    // Snap onto cell faces, where the 1e-7 margins matter.
+                    0 => query = aabb_inflate(query, 1.0e-7, 0.0, 0.0),
+                    1 => {
+                        query = aabb(
+                            c.0.floor(),
+                            c.1.floor(),
+                            c.2.floor(),
+                            c.0.floor() + 1.0,
+                            c.1.floor() + 1.8,
+                            c.2.floor() + 1.0,
+                        )
+                    }
+                    2 => query.min.y = f64::NAN,
+                    3 => query.max.x = f64::NAN,
+                    _ => {}
+                }
+                for only_suffocating in [false, true] {
+                    let want = reference_gather(
+                        &world,
+                        &player,
+                        bounding_box(&player),
+                        query,
+                        only_suffocating,
+                    );
+                    let mut got = Vec::new();
+                    gather(
+                        &world,
+                        &player,
+                        bounding_box(&player),
+                        query,
+                        only_suffocating,
+                        |h| {
+                            got.push(h.into_collision());
+                            true
+                        },
+                    );
+                    assert_eq!(
+                        format!("{got:?}"),
+                        format!("{want:?}"),
+                        "case {case}, query {query:?}, suffocating {only_suffocating}"
+                    );
+                    compared += 1;
+                    nonempty += usize::from(!want.is_empty());
+                }
+            }
+        }
+        assert!(compared > 10_000);
+        assert!(nonempty > 1_000, "only {nonempty} queries hit anything");
+    }
+
+    /// The reference's sequence of tests, verbatim.
+    fn ref_min(a: f64, b: f64) -> f64 {
+        if a.is_nan() {
+            return a;
+        }
+        if a == 0.0 && b == 0.0 && b.to_bits() == (-0.0_f64).to_bits() {
+            return b;
+        }
+        if a <= b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn ref_max(a: f64, b: f64) -> f64 {
+        if a.is_nan() {
+            return a;
+        }
+        if a == 0.0 && b == 0.0 && a.to_bits() == (-0.0_f64).to_bits() {
+            return b;
+        }
+        if a >= b {
+            a
+        } else {
+            b
+        }
+    }
+
+    #[test]
+    fn jmin_jmax_match_the_reference_tests_on_every_pair() {
+        let nan2 = f64::from_bits(0x7ff8_0000_0000_1234);
+        let vals = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            1.0e-7,
+            -1.0e-7,
+            0.5,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            5e-324,
+            -5e-324,
+            1.0e300,
+            -1.0e300,
+            f64::MAX,
+            f64::MIN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            nan2,
+        ];
+        for &a in &vals {
+            for &b in &vals {
+                assert_eq!(
+                    jmin(a, b).to_bits(),
+                    ref_min(a, b).to_bits(),
+                    "min {a:?} {b:?}"
+                );
+                assert_eq!(
+                    jmax(a, b).to_bits(),
+                    ref_max(a, b).to_bits(),
+                    "max {a:?} {b:?}"
+                );
+            }
+        }
+        // And on random bit patterns (NaNs, zeros and denormals included).
+        let mut s = 0x1234_5678_9abc_def1_u64;
+        for _ in 0..500_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let a = f64::from_bits(s);
+            let b = if s & 0x700 == 0 {
+                a
+            } else if s & 0x700 == 0x100 {
+                f64::from_bits(s.rotate_left(17))
+            } else {
+                f64::from_bits(s.rotate_left(31) & !(0x7ff << 52) | ((s >> 3) & 0x7ff) << 52)
+            };
+            assert_eq!(jmin(a, b).to_bits(), ref_min(a, b).to_bits());
+            assert_eq!(jmax(a, b).to_bits(), ref_max(a, b).to_bits());
+            assert_eq!(jmin(b, a).to_bits(), ref_min(b, a).to_bits());
+            assert_eq!(jmax(b, a).to_bits(), ref_max(b, a).to_bits());
+        }
+    }
+
     #[test]
     fn jmin_jmax_follow_java_for_signed_zero() {
         assert_eq!(jmin(0.0, -0.0).to_bits(), (-0.0_f64).to_bits());
@@ -973,5 +1692,86 @@ mod tests {
         assert_eq!(find_index(&s, 1, 0.25), 0);
         assert_eq!(find_index(&s, 1, 0.5), 1);
         assert_eq!(find_index(&s, 1, 3.0), 1);
+    }
+
+    /// The closed-form single-cell routine answers exactly what the general one does, including
+    /// at the `1e-7` snapping edges, with NaN, infinities and signed zeros.
+    #[test]
+    fn single_cell_collide_matches_the_general_routine() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Values near the cell's faces, the snapping thresholds and some awkward ones.
+        let specials = [
+            0.0,
+            -0.0,
+            1.0,
+            0.5,
+            1.0e-7,
+            -1.0e-7,
+            1.0 - 1.0e-7,
+            1.0 + 1.0e-7,
+            2.0e-7,
+            0.3,
+            0.7,
+            1.3,
+            -0.6,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.0e-14,
+            5.0e-8,
+        ];
+        let pick = |r: u64| -> f64 {
+            let base = specials[(r % specials.len() as u64) as usize];
+            match (r >> 8) % 4 {
+                0 => base,
+                1 => base + ((r >> 16) % 7) as f64 * 1.0e-8,
+                2 => base - ((r >> 16) % 7) as f64 * 1.0e-8,
+                _ => ((r >> 12) % 4000) as f64 / 1000.0 - 1.0,
+            }
+        };
+        let mut clamped = 0;
+        for _ in 0..200_000 {
+            let off = [
+                (next() % 5) as i32 - 2,
+                (next() % 5) as i32 - 2,
+                (next() % 5) as i32 - 2,
+            ];
+            let size = [
+                1.0 - (next() % 3) as f64 * 0.25,
+                1.0 - (next() % 3) as f64 * 0.25,
+                1.0 - (next() % 3) as f64 * 0.25,
+            ];
+            let boxes = [[0.0, 0.0, 0.0, size[0], size[1], size[2]]];
+            let shape = Shape::from_boxes(&boxes, off[0], off[1], off[2]).expect("one box");
+            let Repr::Single { min, max } = &shape.repr else {
+                panic!("one box must be a single cell");
+            };
+            let bmin = [pick(next()), pick(next()), pick(next())];
+            let bmax = [pick(next()), pick(next()), pick(next())];
+            let bb = Aabb {
+                min: Vec3::new(bmin[0], bmin[1], bmin[2]),
+                max: Vec3::new(bmax[0], bmax[1], bmax[2]),
+            };
+            let d = pick(next()) * if next() & 1 == 0 { 1.0 } else { -1.0 };
+            let axis = (next() % 3) as usize;
+            let fast = single_collide(min, max, axis, bb, d);
+            let slow = voxel_collide(&shape, axis, bb, d);
+            assert_eq!(
+                fast.to_bits(),
+                slow.to_bits(),
+                "axis {axis} d {d:?} bb {bb:?} shape {min:?} {max:?}"
+            );
+            if fast.to_bits() != d.to_bits() {
+                clamped += 1;
+            }
+        }
+        // The random boxes must actually run into the cell often enough for this to mean something.
+        assert!(clamped > 5_000, "only {clamped} clamped moves");
     }
 }
