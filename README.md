@@ -14,8 +14,8 @@ reimplements behavior and does not copy or redistribute Mojang code.
 Every subsystem below is checked against the oracle corpus: 38 scenarios recorded from the real
 1.21.11 client by the probe mod in `tools/minesim-mod` (`docs/corpus.md`). `cargo xtask oracle`
 replays them all and reports, per scenario, how many ticks reproduce the game's complete player
-state bit-for-bit. Currently **35 of 38 scenarios (8,431 of 8,680 ticks) are exact**, and CI locks
-every exact scenario's hash so a regression fails the build.
+state bit-for-bit. Currently **all 38 scenarios (8,680 of 8,680 ticks) are exact**, and CI locks
+every scenario's hash on Linux, Windows and macOS (ARM64) so a regression fails the build.
 
 | Subsystem | State |
 | --- | --- |
@@ -29,7 +29,7 @@ every exact scenario's hash so a regression fails the build.
 | Fall damage, damage with the invulnerability window, knockback (including the server's copy of the velocity and the network quantization the client receives) | bit-exact |
 | Projectiles: snowballs, eggs, ender pearls, arrows, spectral arrows (flight, block hits, arrows sticking, hitting the player) | bit-exact on every recorded sample |
 | `java.util.Random`, `LegacyRandomSource`, Xoroshiro128++, `Mth`, fdlibm math | bit-exact vs the JVM and the game classes |
-| Freezing in powder snow, magma-block damage timing | close, not yet exact (the 3 remaining scenarios) |
+| Powder snow (sinking, freezing, the freeze slowdown and damage), magma-block damage | bit-exact |
 | Mobs, redstone, world generation, riding, elytra, creative flight | out of scope |
 
 An agent's action is what a player at the keyboard controls: the seven movement keys and the look
