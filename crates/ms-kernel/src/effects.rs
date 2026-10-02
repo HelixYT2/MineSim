@@ -519,7 +519,10 @@ pub fn frost_modifier(ticks_frozen: i32) -> Modifier {
 
 /// `LivingEntity.removeFrost`. Part of the *server's* `aiStep` (`ServerLevel` branch): the client
 /// only sees the result through attribute-update packets, whose timing follows the server's tick
-/// rather than the client's, so a client replay cannot derive it from `ticks_frozen` alone.
+/// rather than the client's, so a client replay cannot derive it from `ticks_frozen` alone (it
+/// takes it from the recorded movement speed, [`frost_ticks_for_movement_speed`]). A simulator that
+/// is its own server runs the whole freeze step in [`crate::damage::server_do_tick`] and delivers
+/// the result with [`client_set_frost`].
 pub fn remove_frost(p: &mut PlayerState) {
     p.attributes
         .remove_modifier(Attribute::MovementSpeed, POWDER_SNOW_MODIFIER_ID);
@@ -533,6 +536,59 @@ pub fn try_add_frost(p: &mut PlayerState, standing_on_air: bool) {
         p.attributes
             .add_modifier(Attribute::MovementSpeed, modifier);
     }
+}
+
+/// `LivingEntity.canFreeze` for the simulated player: not a spectator and wearing no leather armour
+/// (`FREEZE_IMMUNE_WEARABLES`); the player has no equipment slots and no spectator mode here, so it
+/// can always freeze. The one place to extend.
+pub fn can_freeze(_p: &PlayerState) -> bool {
+    true
+}
+
+/// `Entity.getTicksRequiredToFreeze`: the ticks of powder snow that freeze an entity completely.
+pub fn ticks_required_to_freeze() -> i32 {
+    TICKS_REQUIRED_TO_FREEZE
+}
+
+/// `Entity.isFullyFrozen` for a freeze counter of `ticks_frozen`.
+pub fn is_fully_frozen(ticks_frozen: i32) -> bool {
+    ticks_frozen >= TICKS_REQUIRED_TO_FREEZE
+}
+
+/// Replace the client's freeze slowdown by the one the server's attribute packet carried: the
+/// modifier for `server_ticks_frozen` (`None`: the server has none on the movement speed). The
+/// client applies such a packet by replacing the attribute's whole modifier list; all that matters
+/// for the freeze slowdown is that afterwards exactly the server's modifier is there.
+pub fn client_set_frost(p: &mut PlayerState, server_ticks_frozen: Option<i32>) {
+    remove_frost(p);
+    if let Some(ticks) = server_ticks_frozen {
+        p.attributes
+            .add_modifier(Attribute::MovementSpeed, frost_modifier(ticks));
+    }
+}
+
+/// Which freeze slowdown explains a recorded movement-speed value: `Some(None)` when the value is
+/// that of the current modifiers without any freeze modifier, `Some(Some(k))` when it is the value
+/// with the freeze modifier of a server `ticksFrozen` of `k` (1 to 140; larger counters give the
+/// same modifier as 140), and `None` when no freeze state reproduces it bit for bit.
+///
+/// The client sees only the *modifier* the server's `aiStep` computed, from the server's own
+/// `ticksFrozen` of that moment; that counter reaches the client separately (entity data, and
+/// offset by the server's own timing), so it cannot be recovered from the client's `ticksFrozen`.
+/// A replay that has the recorded attribute value recovers it here, by trying every counter.
+pub fn frost_ticks_for_movement_speed(p: &PlayerState, value_bits: u64) -> Option<Option<i32>> {
+    let mut probe = p.attributes.clone();
+    probe.remove_modifier(Attribute::MovementSpeed, POWDER_SNOW_MODIFIER_ID);
+    if probe.value(Attribute::MovementSpeed).to_bits() == value_bits {
+        return Some(None);
+    }
+    for k in 1..=TICKS_REQUIRED_TO_FREEZE {
+        probe.add_modifier(Attribute::MovementSpeed, frost_modifier(k));
+        if probe.value(Attribute::MovementSpeed).to_bits() == value_bits {
+            return Some(Some(k));
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -956,6 +1012,42 @@ mod tests {
         );
         remove_frost(&mut p);
         assert_eq!(ms(&p).to_bits(), f64::from(0.1_f32).to_bits());
+    }
+
+    #[test]
+    fn a_recorded_movement_speed_says_which_freeze_slowdown_it_carries() {
+        let q = player();
+        let none = ms(&q).to_bits();
+        assert_eq!(frost_ticks_for_movement_speed(&q, none), Some(None));
+        for k in [1, 2, 7, 56, 139, 140, 500] {
+            let mut p = player();
+            client_set_frost(&mut p, Some(k));
+            let value = ms(&p).to_bits();
+            // Counters past 140 give the 140 modifier.
+            assert_eq!(
+                frost_ticks_for_movement_speed(&q, value),
+                Some(Some(k.min(140))),
+                "k = {k}"
+            );
+            // The same through the sprint modifier and a speed effect.
+            let mut r = player();
+            add_effect(&mut r, SPEED, 1, 600);
+            set_sprinting(&mut r, true);
+            let plain = r.clone();
+            client_set_frost(&mut r, Some(k));
+            let with_frost = ms(&r).to_bits();
+            assert_eq!(
+                frost_ticks_for_movement_speed(&plain, with_frost),
+                Some(Some(k.min(140))),
+                "k = {k} with sprint and speed"
+            );
+            // Installing it replaces an earlier one, and `None` removes it.
+            client_set_frost(&mut r, Some(3));
+            client_set_frost(&mut r, None);
+            assert_eq!(ms(&r).to_bits(), ms(&plain).to_bits());
+        }
+        // A value no freeze state reproduces.
+        assert_eq!(frost_ticks_for_movement_speed(&q, 0.05_f64.to_bits()), None);
     }
 
     #[test]

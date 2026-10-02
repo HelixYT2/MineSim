@@ -1170,6 +1170,8 @@ pub fn clear_fire(p: &mut PlayerState) {
 /// `Entity.clearFreeze` (the `CLEAR_FREEZE` effect of lava).
 pub fn clear_freeze(p: &mut PlayerState) {
     p.ticks_frozen = 0;
+    // The server's `applyEffectsFromBlocks` clears its own count for the same step.
+    crate::damage::note_thaw(p);
 }
 
 // ---------------------------------------------------------------------------------------------

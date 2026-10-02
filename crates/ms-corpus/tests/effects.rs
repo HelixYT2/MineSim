@@ -144,12 +144,22 @@ fn replay(s: &Scenario, view: View) -> Report {
             known_attrs = new;
         }
         match view {
-            View::Client => effects::client_apply_server_changes(
-                &mut p,
-                server_effects.as_deref(),
-                sprint_change,
-                &updated,
-            ),
+            View::Client => {
+                effects::client_apply_server_changes(
+                    &mut p,
+                    server_effects.as_deref(),
+                    sprint_change,
+                    &updated,
+                );
+                // The movement-speed packet also carries the server's freeze slowdown; the recorded
+                // value says which one.
+                if updated.contains(&Attribute::MovementSpeed) {
+                    let bits = known_attrs["movement_speed"];
+                    if let Some(frost) = effects::frost_ticks_for_movement_speed(&p, bits) {
+                        effects::client_set_frost(&mut p, frost);
+                    }
+                }
+            }
             View::Server => {
                 if let Some(server) = &server_effects {
                     let stale: Vec<String> = p
@@ -279,18 +289,13 @@ fn server_view_replay_differs_only_where_the_attribute_packet_lags() {
     }
 }
 
-/// Scenarios whose recorded movement speed carries the powder-snow freeze slowdown. That modifier
-/// is applied by the *server's* `aiStep` and reaches the client in attribute packets timed by the
-/// server's own tick, so it is not derivable from the client-side state; see
-/// `effects::try_add_frost`. Everything else in these scenarios (every other attribute, the effects)
-/// must still be exact.
-const FROST: &[&str] = &["ladder_climb", "powder_snow"];
-
-/// Every other recorded scenario: the sprint modifier and any effects must line up everywhere, apart
-/// from the freeze slowdown above.
+/// Every other recorded scenario: the sprint modifier, any effects and the powder-snow freeze
+/// slowdown (`powder_snow`, and `ladder_climb`, which starts frozen) line up everywhere. The
+/// slowdown is the *server's* (`LivingEntity.tryAddFrost` runs only on the server, from the
+/// server's own `ticksFrozen`); the client replay takes the one the recorded movement-speed value
+/// carries ([`effects::frost_ticks_for_movement_speed`]).
 #[test]
-fn other_scenarios_are_exact_apart_from_the_freeze_slowdown() {
-    let mut exact = 0;
+fn every_other_scenario_is_exact_including_the_freeze_slowdown() {
     let mut total = 0;
     for name in client_scenarios() {
         if REQUIRED.contains(&name.as_str()) {
@@ -300,21 +305,8 @@ fn other_scenarios_are_exact_apart_from_the_freeze_slowdown() {
         let rep = replay(&s, View::Client);
         print(&name, "client", &rep);
         total += 1;
-        if rep.mismatch_rows.is_empty() {
-            exact += 1;
-        } else {
-            assert!(
-                FROST.contains(&name.as_str()),
-                "{name}: {:?}",
-                rep.mismatches
-            );
-            assert_eq!(
-                rep.mismatch_kinds,
-                ["movement_speed"],
-                "{name}: only the movement speed may differ"
-            );
-        }
+        assert!(rep.mismatch_rows.is_empty(), "{name}: {:?}", rep.mismatches);
     }
-    println!("{exact} of {total} other scenarios reproduce effects and attributes exactly");
-    assert_eq!(total - exact, FROST.len());
+    println!("{total} other scenarios reproduce effects and attributes exactly");
+    assert!(total >= 30);
 }

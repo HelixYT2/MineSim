@@ -14,9 +14,9 @@
     },
     "bubble_columns": {
       "checkpoints": "c0a82621 2afc745a ef4375ad 027408e7 6b61c212 d1aba1e1 bf3b3e3f 262c8ae7 f78fe7dd cc5bc6d5 7e5dea3b b8e657cb 796ce00b",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x796ce00b803a1ea6",
-      "sim": "0x459db7106bc34102",
+      "sim": "0x796ce00b803a1ea6",
       "ticks": 200
     },
     "cobweb_berries": {
@@ -126,9 +126,9 @@
     },
     "ladder_climb": {
       "checkpoints": "1095b491 b4585476 1445163e caa6fd92 ac1f329c eba3bb8e 0ccbd1ef 4bf71b90 e456208d 3bd44981 3b19c8b5 a7b7b1b0 31edc061 805df7a8 b5e80ecb 66898d6c df89e746 74b243e9 36e10113 007b8b58",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x007b8b589f41fe12",
-      "sim": "0xf63e5260450440e4",
+      "sim": "0x007b8b589f41fe12",
       "ticks": 310
     },
     "lava_pool": {
@@ -154,9 +154,9 @@
     },
     "powder_snow": {
       "checkpoints": "a908fb71 00a93a39 285e2958 1033c13e 8279856a 16f31813 e43ac7b1 c64cbb30 38c5d939 8087795e 249e4f45 620bc30d",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x620bc30d46d7e90c",
-      "sim": "0x86cd5c0edc0a51a1",
+      "sim": "0x620bc30d46d7e90c",
       "ticks": 185
     },
     "projectile_flights": {
