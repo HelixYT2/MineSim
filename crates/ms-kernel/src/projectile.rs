@@ -88,8 +88,6 @@ const ARROW_LIFE_LIMIT: i32 = 1200;
 const ARROW_BASE_DAMAGE: f64 = 2.0;
 /// `0.05F`, the distance an arrow is pushed back out of the block it hit.
 const ARROW_BACK_OFF: f64 = 0.05_f32 as f64;
-/// Strength `LivingEntity.hurtServer` hands to `knockback` (`0.4F`).
-const HURT_KNOCKBACK: f64 = 0.4_f32 as f64;
 /// Overworld lava fluid push strength (`FAST_LAVA` is a nether attribute).
 const LAVA_PUSH: f64 = 0.0023333333333333335;
 /// Water fluid push strength.
@@ -1370,18 +1368,18 @@ impl HitTarget for PlayerState {
         self.is_alive()
     }
 
-    /// `ServerPlayer.hurtServer` with the projectile as direct entity. The damage goes through
-    /// [`damage::hurt`]; the knockback `(−vx, −vz)` is applied through [`damage::knockback`] when
-    /// the hit was a full one (it opened a new invulnerability window; inside the window only the
-    /// excess damage lands, with no knockback), which is what `hurt` does itself for sources that
-    /// carry a direction.
+    /// `ServerPlayer.hurtServer` with the projectile as direct entity: the damage, and for a full
+    /// hit (one that opens a new invulnerability window) the standard knockback along the
+    /// projectile's horizontal direction (`Projectile.calculateHorizontalHurtKnockbackDirection`).
     fn hurt_by_projectile(&mut self, hit: &ProjectileHit) -> bool {
-        let in_window = self.invulnerable_time as f32 > 10.0;
-        let landed = damage::hurt(self, DamageSource::Generic, hit.amount);
-        if landed && !in_window {
-            damage::knockback(self, HURT_KNOCKBACK, hit.knockback_dx, hit.knockback_dz);
-        }
-        landed
+        damage::hurt(
+            self,
+            DamageSource::Directed {
+                dx: hit.knockback_dx,
+                dz: hit.knockback_dz,
+            },
+            hit.amount,
+        )
     }
 }
 

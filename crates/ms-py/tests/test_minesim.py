@@ -223,6 +223,17 @@ def test_water_slows_and_floats():
     assert arena.vel()[1] > 0.0 or arena.pos()[1] > 0.0
 
 
+def test_arrow_hits_player():
+    arena = minesim.Arena(surface_y=0)
+    _settle(arena)
+    arena.spawn_projectile("arrow", 0.5, 1.2, -5.5, 0.0, 0.05, 2.0)
+    assert len(arena.projectiles()) == 1
+    for _ in range(10):
+        arena.step()
+    assert arena.projectiles() == []
+    assert arena.health() == 16.0
+
+
 def test_native_batch_rejects_bad_action_shape():
     batch = minesim.Batch(num_envs=3)
     try:

@@ -7,6 +7,7 @@
 #![allow(clippy::useless_conversion)]
 
 use ms_arena::{Action, Arena, BatchArena, PlayerState};
+use ms_kernel::projectile::ProjectileKind;
 use ms_numerics::Vec3;
 use ms_world::{FlatWorld, GridWorld, World};
 use numpy::ndarray::Array2;
@@ -348,6 +349,46 @@ impl PyArena {
             yaw,
             pitch,
         );
+    }
+
+    /// Launch a projectile (`"snowball"`, `"egg"`, `"ender_pearl"`, `"arrow"` or
+    /// `"spectral_arrow"`) from `(x, y, z)` with velocity `(vx, vy, vz)` in blocks per tick. It
+    /// flies under the game's gravity and drag, collides with blocks, and can hit the player
+    /// (arrows deal `ceil(speed * 2)` damage with knockback; snowballs and eggs only knock back
+    /// mobs, so they do nothing to a player).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_projectile(
+        &mut self,
+        kind: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        vx: f64,
+        vy: f64,
+        vz: f64,
+    ) -> PyResult<()> {
+        let k = ProjectileKind::from_id(kind)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown projectile '{kind}'")))?;
+        self.inner
+            .spawn_projectile(k, Vec3::new(x, y, z), Vec3::new(vx, vy, vz));
+        Ok(())
+    }
+
+    /// Projectiles in the world as `(kind, (x, y, z), (vx, vy, vz), stuck_in_block)` tuples.
+    #[allow(clippy::type_complexity)]
+    fn projectiles(&self) -> Vec<(String, (f64, f64, f64), (f64, f64, f64), bool)> {
+        self.inner
+            .projectiles
+            .iter()
+            .map(|p| {
+                (
+                    format!("{:?}", p.kind),
+                    (p.pos.x, p.pos.y, p.pos.z),
+                    (p.vel.x, p.vel.y, p.vel.z),
+                    p.in_ground,
+                )
+            })
+            .collect()
     }
 
     /// Place a block, e.g. `set_block(3, 0, 5, "minecraft:ladder[facing=north]")`.

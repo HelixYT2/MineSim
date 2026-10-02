@@ -11,6 +11,7 @@
 //! with the same one-tick delay they have in the game.
 
 use ms_kernel::damage::{self, DamageSource, TickStart};
+use ms_kernel::projectile::{Projectile, ProjectileKind};
 use ms_kernel::{effects, player};
 use ms_numerics::Vec3;
 use ms_world::World;
@@ -29,6 +30,9 @@ pub type Player = PlayerState;
 pub struct Arena {
     world: World,
     pub player: Player,
+    /// Projectiles in flight (or stuck in blocks), in spawn order; removed ones are dropped at the
+    /// end of the tick that removed them.
+    pub projectiles: Vec<Projectile>,
 }
 
 impl Arena {
@@ -37,12 +41,21 @@ impl Arena {
         Self {
             world,
             player: PlayerState::new(pos, yaw),
+            projectiles: Vec::new(),
         }
     }
 
-    /// Reset the player to a position/orientation, at rest (full health and food, no effects).
+    /// Reset the player to a position/orientation, at rest (full health and food, no effects), and
+    /// remove every projectile.
     pub fn reset(&mut self, pos: Vec3, yaw: f32) {
         self.player = PlayerState::new(pos, yaw);
+        self.projectiles.clear();
+    }
+
+    /// Launch a projectile from `pos` with velocity `vel` (blocks per tick), as a dispenser or an
+    /// unseen shooter would; it flies from the next tick on and can hit the player.
+    pub fn spawn_projectile(&mut self, kind: ProjectileKind, pos: Vec3, vel: Vec3) {
+        self.projectiles.push(Projectile::new(kind, pos, vel));
     }
 
     pub fn world(&self) -> &World {
@@ -77,6 +90,11 @@ impl Arena {
         player::tick(p, action, &self.world);
         damage::server_move_packet(p, &start, &self.world);
         damage::sync_motion(p);
+        // The server's entity phase: projectiles fly and may hit the player.
+        for proj in &mut self.projectiles {
+            proj.tick(&self.world, Some(&mut *p));
+        }
+        self.projectiles.retain(|proj| !proj.removed);
         damage::server_do_tick(p, &self.world);
     }
 
@@ -203,6 +221,26 @@ mod tests {
         // Inside the invulnerability window a weaker hit does nothing.
         assert!(!a.hurt_from(1.0, 0.5, 3.5));
         assert_eq!(a.player.health, 18.0);
+    }
+
+    #[test]
+    fn an_arrow_hurts_and_knocks_back() {
+        let mut a = Arena::new(World::flat(0), Vec3::new(0.5, 0.0, 0.5), 0.0);
+        settle(&mut a);
+        // Fired along +z at chest height from 6 blocks away.
+        a.spawn_projectile(
+            ProjectileKind::Arrow,
+            Vec3::new(0.5, 1.2, -5.5),
+            Vec3::new(0.0, 0.05, 2.0),
+        );
+        for _ in 0..10 {
+            a.step(&idle());
+        }
+        assert!(a.projectiles.is_empty(), "the arrow is spent on the hit");
+        assert_eq!(
+            a.player.health, 16.0,
+            "2 blocks/tick arrow: ceil(2.0 * 2.0) = 4 damage"
+        );
     }
 
     #[test]
