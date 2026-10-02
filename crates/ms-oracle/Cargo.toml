@@ -6,4 +6,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The player serializer reads `ms_kernel::PlayerState`. The dependency graph stays acyclic
+# (kernel depends on neither the oracle nor the arena).
+ms-kernel = { workspace = true }
 xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+ms-numerics = { workspace = true }

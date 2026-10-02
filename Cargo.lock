@@ -264,6 +264,7 @@ dependencies = [
  "ms-data",
  "ms-kernel",
  "ms-numerics",
+ "ms-oracle",
  "ms-world",
  "serde_json",
 ]
@@ -290,6 +291,8 @@ version = "0.0.0"
 name = "ms-oracle"
 version = "0.0.0"
 dependencies = [
+ "ms-kernel",
+ "ms-numerics",
  "xxhash-rust",
 ]
 
@@ -709,6 +712,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "ms-arena",
+ "ms-corpus",
  "ms-data",
  "ms-kernel",
  "ms-numerics",

@@ -14,8 +14,11 @@
 /tools/**/build/
 /tools/**/.gradle/
 
-# Datagen / oracle local scratch (the committed corpus lives in corpus/ as .jsonl.gz)
+# Datagen / oracle local scratch (the committed corpus lives in corpus/ as .jsonl.gz; raw
+# recordings are compressed before they are committed, see docs/corpus.md)
 /corpus/scratch/
+/corpus/**/*.jsonl
+/corpus/**/*.tmp
 
 # Python
 __pycache__/

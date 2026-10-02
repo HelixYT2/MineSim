@@ -5,8 +5,26 @@
 //! previous row's end state — what the server changed in between), the state after the tick, and
 //! any server-side events. [`Scenario::world`] rebuilds the arena; [`apply_state`] writes recorded
 //! fields into a [`PlayerState`]; [`compare_state`] lists the fields a simulated state gets wrong.
+//!
+//! On top of the loader:
+//!
+//! - [`replay`] free-runs a scenario through a tick function and returns a [`Report`] (per-tick
+//!   field diffs, first divergence, exact-tick count, longest exact streak, per-tick state hashes);
+//! - [`projectiles`] groups the server-side projectile samples per entity and replays them;
+//! - [`canonical`] serializes the *recorded* states into the `contract-v1` bytes the simulator's
+//!   states are hashed with (`ms_oracle::player`), so `H_sim(t) == H_oracle(t)` is checkable;
+//! - [`golden`] is the committed golden-hash lock (`corpus/golden-hashes.json`);
+//! - [`cli`] is `cargo xtask oracle`.
 
 #![forbid(unsafe_code)]
+
+pub mod canonical;
+pub mod cli;
+pub mod golden;
+pub mod projectiles;
+pub mod replay;
+
+pub use replay::{diff_state, replay, replay_with, Divergence, Mode, Report};
 
 use ms_kernel::attributes::Attribute;
 use ms_kernel::effects::{EffectInstance, Effects};

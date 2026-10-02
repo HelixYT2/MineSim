@@ -10,5 +10,6 @@ ms-numerics = { workspace = true }
 ms-data = { workspace = true }
 ms-world = { workspace = true }
 ms-kernel = { workspace = true }
+ms-oracle = { workspace = true }
 serde_json = "1"
 flate2 = "1"

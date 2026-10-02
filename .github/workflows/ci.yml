@@ -16,6 +16,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The oracle corpus (corpus/client/*.jsonl.gz) is committed as plain files, not LFS.
+          lfs: false
       - name: Show toolchain (auto-installed from rust-toolchain.toml)
         run: rustup show
       - name: Format check
@@ -24,6 +27,27 @@ jobs:
         run: cargo clippy --workspace --exclude ms-py --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude ms-py
+      - name: Corpus is plain gzip, not LFS pointers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [ -f .gitattributes ] && grep -q 'filter=lfs' .gitattributes; then
+            echo "::error::the corpus must not use LFS (docs/corpus.md)"
+            exit 1
+          fi
+          n=0
+          for f in corpus/client/*.jsonl.gz; do
+            gzip -t "$f" || { echo "::error::$f is not a valid gzip stream"; exit 1; }
+            n=$((n + 1))
+          done
+          echo "OK: $n corpus scenarios are valid gzip"
+      - name: Corpus replay and golden-hash lock (docs/contract.md section 5)
+        # Replays every scenario in corpus/client through ms_kernel::player::tick and checks the
+        # rolling state hashes against corpus/golden-hashes.json. Already part of `cargo test`;
+        # run alone so a broken lock is named in the log.
+        run: cargo test -p ms-corpus --test golden -- --nocapture
+      - name: Oracle conformance report (informational)
+        run: cargo xtask oracle
 
   python:
     name: python wheel / binding tests (${{ matrix.os }})

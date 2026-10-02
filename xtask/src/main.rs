@@ -22,8 +22,12 @@ fn main() -> ExitCode {
             }
         },
         Some("oracle") => {
-            println!("oracle: not yet implemented");
-            ExitCode::SUCCESS
+            let a: Vec<String> = std::env::args().skip(2).collect();
+            // The replay/report/bless logic lives in `ms_corpus::cli` (also unit-tested there).
+            match ms_corpus::cli::oracle_main(&a) {
+                0 => ExitCode::SUCCESS,
+                code => ExitCode::from(code as u8),
+            }
         }
         Some("probe-world") => {
             let a: Vec<String> = std::env::args().skip(2).collect();
