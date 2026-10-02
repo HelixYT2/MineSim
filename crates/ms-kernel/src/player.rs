@@ -53,23 +53,28 @@ pub fn can_fit_in_pose(p: &PlayerState, world: &World, pose: Pose) -> bool {
     collision::no_collision(world, p, bb)
 }
 
-/// `LivingEntity.setSprinting` as seen by the movement-speed attribute: the flag, and the
-/// "sprinting" modifier (+30% total) added or removed. The effects module owns this
-/// ([`crate::effects::set_sprinting`], called first); re-establishing the modifier afterwards is
-/// idempotent and keeps the physics right while that hook is a stub.
+/// `LivingEntity.setSprinting`: the flag plus the "sprinting" modifier (+30% total) on the
+/// movement-speed attribute. The effects module owns this ([`crate::effects::set_sprinting`], called
+/// first, and authoritative). Until that hook does more than flip the flag, the modifier is
+/// completed here; once the hook maintains it, the check below finds nothing to do.
 pub fn set_sprinting(p: &mut PlayerState, sprinting: bool) {
     crate::effects::set_sprinting(p, sprinting);
-    p.attributes
-        .remove_modifier(Attribute::MovementSpeed, "minecraft:sprinting");
-    if sprinting {
-        p.attributes.add_modifier(
-            Attribute::MovementSpeed,
-            Modifier {
-                id: "minecraft:sprinting".to_string(),
-                amount: f64::from(0.3_f32),
-                operation: Operation::AddMultipliedTotal,
-            },
-        );
+    if p.attributes
+        .has_modifier(Attribute::MovementSpeed, "minecraft:sprinting")
+        != sprinting
+    {
+        p.attributes
+            .remove_modifier(Attribute::MovementSpeed, "minecraft:sprinting");
+        if sprinting {
+            p.attributes.add_modifier(
+                Attribute::MovementSpeed,
+                Modifier {
+                    id: "minecraft:sprinting".to_string(),
+                    amount: f64::from(0.3_f32),
+                    operation: Operation::AddMultipliedTotal,
+                },
+            );
+        }
     }
 }
 
