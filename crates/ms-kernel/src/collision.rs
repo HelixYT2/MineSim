@@ -829,7 +829,20 @@ fn candidate_step_up_heights(
 /// `Entity.collide`: resolve `motion` against the world, with step-up. `step_height` is
 /// `maxUpStep()` (the step-height attribute as a float).
 pub fn collide(p: &PlayerState, world: &World, motion: Vec3, step_height: f32) -> Vec3 {
-    let bb = bounding_box(p);
+    collide_at(p, world, bounding_box(p), p.on_ground, motion, step_height)
+}
+
+/// [`collide`] for the box `bb` with ground flag `on_ground` instead of the player's own (the
+/// server's copy of the player moves from its own position and ground state). `p` only supplies
+/// the entity context for entity-dependent block shapes.
+pub fn collide_at(
+    p: &PlayerState,
+    world: &World,
+    bb: Aabb,
+    on_ground: bool,
+    motion: Vec3,
+    step_height: f32,
+) -> Vec3 {
     let length_sqr = motion.x * motion.x + motion.y * motion.y + motion.z * motion.z;
     let collided = if length_sqr == 0.0 {
         motion
@@ -842,7 +855,7 @@ pub fn collide(p: &PlayerState, world: &World, motion: Vec3, step_height: f32) -
     let hit_y = motion.y != collided.y;
     let hit_z = motion.z != collided.z;
     let hit_down = hit_y && motion.y < 0.0;
-    if step_height > 0.0 && (hit_down || p.on_ground) && (hit_x || hit_z) {
+    if step_height > 0.0 && (hit_down || on_ground) && (hit_x || hit_z) {
         let bb2 = if hit_down {
             aabb_move(bb, 0.0, collided.y, 0.0)
         } else {

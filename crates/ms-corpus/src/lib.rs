@@ -133,10 +133,11 @@ impl Scenario {
         World::grid(grid)
     }
 
-    /// The complete state at the start of the recording.
+    /// The complete state at the start of the recording, with effects and attributes brought in
+    /// the way the client receives them (so attribute modifiers match the effects).
     pub fn initial_state(&self) -> PlayerState {
         let mut p = PlayerState::new(Vec3::ZERO, 0.0);
-        apply_state(&mut p, &self.rows[0].pre);
+        apply_pre(&mut p, &self.rows[0].pre, None);
         p
     }
 }
@@ -250,6 +251,44 @@ pub fn apply_state(p: &mut PlayerState, f: &Fields) {
             _ => {}
         }
     }
+}
+
+/// Apply a row's `pre` (what the server changed since `prev_post`, the previous row's end state;
+/// `None` for the first row): every plain field is written directly, while effects, the sprint
+/// flag and attribute updates go through the kernel's client-side effect handling, so attribute
+/// modifiers stay consistent with the effects. This is what a replay should use; [`apply_state`]
+/// is the raw field writer.
+pub fn apply_pre(p: &mut PlayerState, pre: &Fields, prev_post: Option<&Fields>) {
+    let mut plain = pre.clone();
+    let effects = plain.remove("effects").map(|v| parse_effects(&v));
+    let sprinting = plain.remove("sprinting").map(|v| bit(&v));
+    let attrs = plain.remove("attrs");
+    apply_state(p, &plain);
+    let updated: Vec<Attribute> = match &attrs {
+        Some(Value::Object(now)) => Attribute::ALL
+            .into_iter()
+            .filter(|a| {
+                let before = prev_post
+                    .and_then(|f| f.get("attrs"))
+                    .and_then(|v| v.get(a.name()));
+                prev_post.is_none() || before != now.get(a.name())
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    ms_kernel::effects::client_apply_server_changes(p, effects.as_deref(), sprinting, &updated);
+}
+
+fn parse_effects(v: &Value) -> Vec<EffectInstance> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| EffectInstance {
+            id: x["id"].as_str().unwrap_or_default().to_string(),
+            amplifier: x["amp"].as_i64().unwrap_or(0) as i32,
+            duration: x["dur"].as_i64().unwrap_or(0) as i32,
+        })
+        .collect()
 }
 
 /// One field that differs between a simulated state and the recording.

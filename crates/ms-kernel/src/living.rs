@@ -295,7 +295,9 @@ fn travel_in_air(p: &mut PlayerState, world: &World, input: Vec3) {
 /// `LivingEntity.travel`.
 fn living_travel(p: &mut PlayerState, world: &World, input: Vec3) {
     if crate::fluids::should_travel_in_fluid(p, world) {
-        crate::fluids::travel_in_fluid(p, world, input);
+        crate::fluids::travel_in_fluid(p, world, input, &mut |p, d| {
+            crate::entity::move_entity(p, world, d);
+        });
     } else {
         // (elytra flight is not simulated)
         travel_in_air(p, world, input);

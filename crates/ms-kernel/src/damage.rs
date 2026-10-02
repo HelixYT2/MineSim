@@ -632,34 +632,6 @@ fn player_box(p: &PlayerState, pos: Vec3) -> Aabb {
     )
 }
 
-fn gather_colliders(p: &PlayerState, world: &World, bb: Aabb, region: Aabb) -> Vec<Aabb> {
-    let (x0, x1) = (mth_floor(region.min.x), mth_floor(region.max.x));
-    let (y0, y1) = (mth_floor(region.min.y), mth_floor(region.max.y));
-    let (z0, z1) = (mth_floor(region.min.z), mth_floor(region.max.z));
-    let mut out = Vec::new();
-    for bx in x0..=x1 {
-        for by in y0..=y1 {
-            for bz in z0..=z1 {
-                for s in crate::blocks::collision_boxes(p, bb, world, bx, by, bz) {
-                    out.push(Aabb::new(
-                        Vec3::new(
-                            f64::from(bx) + s[0],
-                            f64::from(by) + s[1],
-                            f64::from(bz) + s[2],
-                        ),
-                        Vec3::new(
-                            f64::from(bx) + s[3],
-                            f64::from(by) + s[4],
-                            f64::from(bz) + s[5],
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-    out
-}
-
 /// `Entity.getBlockSpeedFactor` with the `LivingEntity` override (movement efficiency), at `pos`.
 fn block_speed_factor(p: &PlayerState, world: &World, pos: Vec3) -> f32 {
     let (x, y, z) = (mth_floor(pos.x), mth_floor(pos.y), mth_floor(pos.z));
@@ -755,11 +727,7 @@ fn server_move_self(p: &mut PlayerState, world: &World, pos: Vec3) {
     let motion = p.server_vel;
     let bb = player_box(p, pos);
     let step = p.attributes.value(Attribute::StepHeight) as f32;
-    let region = bb
-        .expand_towards(motion)
-        .expand_towards(Vec3::new(0.0, f64::from(step), 0.0));
-    let colliders = gather_colliders(p, world, bb, region);
-    let moved = crate::collision::collide(motion, bb, p.server.on_ground, step, &colliders);
+    let moved = crate::collision::collide_at(p, world, bb, p.server.on_ground, motion, step);
 
     let moved_len_sq = moved.x * moved.x + moved.y * moved.y + moved.z * moved.z;
     let motion_len_sq = motion.x * motion.x + motion.y * motion.y + motion.z * motion.z;
@@ -834,7 +802,9 @@ fn server_ai_step(p: &mut PlayerState, world: &World) {
         let mut scratch = p.clone();
         scratch.vel = p.server_vel;
         scratch.on_ground = p.server.on_ground;
-        crate::fluids::travel_in_fluid(&mut scratch, world, Vec3::ZERO);
+        crate::fluids::travel_in_fluid(&mut scratch, world, Vec3::ZERO, &mut |s, d| {
+            crate::entity::move_entity(s, world, d);
+        });
         p.server_vel = scratch.vel;
         p.server.on_ground = scratch.on_ground;
         return;

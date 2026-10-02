@@ -6,7 +6,7 @@
 //! `cargo test -p ms-corpus --test core -- --nocapture` prints the per-scenario tally and, for any
 //! scenario that diverges, the first diverging ticks.
 
-use ms_corpus::{apply_state, compare_state, FieldDiff, Scenario};
+use ms_corpus::{apply_pre, apply_state, compare_state, FieldDiff, Scenario};
 use ms_kernel::player::tick;
 use std::collections::BTreeMap;
 
@@ -72,7 +72,12 @@ fn replay_with(name: &str, resync: bool) -> Report {
                 p.supporting_block = None;
             }
         }
-        apply_state(&mut p, &row.pre);
+        let prev = if i == 0 {
+            None
+        } else {
+            Some(&scenario.rows[i - 1].post)
+        };
+        apply_pre(&mut p, &row.pre, prev);
         tick(&mut p, &row.input, &world);
         let diffs: Vec<FieldDiff> = compare_state(&p, &row.post)
             .into_iter()

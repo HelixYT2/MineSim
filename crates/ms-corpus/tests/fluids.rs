@@ -16,7 +16,7 @@
 
 use ms_corpus::{apply_state, compare_state, FieldDiff, Fields, Scenario};
 use ms_kernel::attributes::{Attribute, Modifier, Operation};
-use ms_kernel::{blocks, collision, fluids};
+use ms_kernel::{collision, fluids};
 use ms_kernel::{Input, PlayerState};
 use ms_numerics::{mth, Vec3};
 use ms_world::aabb::Aabb;
@@ -205,35 +205,6 @@ fn player_box(p: &PlayerState) -> Aabb {
     )
 }
 
-/// Block collision boxes overlapping `region`, in the order the game gathers them.
-fn gather(p: &PlayerState, world: &World, region: Aabb) -> Vec<Aabb> {
-    let (x0, x1) = (region.min.x.floor() as i32, region.max.x.floor() as i32);
-    let (y0, y1) = (region.min.y.floor() as i32, region.max.y.floor() as i32);
-    let (z0, z1) = (region.min.z.floor() as i32, region.max.z.floor() as i32);
-    let mut out = Vec::new();
-    for x in x0..=x1 {
-        for y in y0..=y1 {
-            for z in z0..=z1 {
-                for s in blocks::collision_boxes(p, region, world, x, y, z) {
-                    out.push(Aabb::new(
-                        Vec3::new(
-                            f64::from(x) + s[0],
-                            f64::from(y) + s[1],
-                            f64::from(z) + s[2],
-                        ),
-                        Vec3::new(
-                            f64::from(x) + s[3],
-                            f64::from(y) + s[4],
-                            f64::from(z) + s[5],
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-    out
-}
-
 /// `Mth.equal(double, double)`.
 fn mth_equal(a: f64, b: f64) -> bool {
     (b - a).abs() < f64::from(1.0e-5_f32)
@@ -244,11 +215,7 @@ fn mth_equal(a: f64, b: f64) -> bool {
 fn entity_move(p: &mut PlayerState, world: &World, motion: Vec3) {
     let bb = player_box(p);
     let step = p.attributes.value(Attribute::StepHeight) as f32;
-    let region = bb
-        .expand_towards(motion)
-        .expand_towards(Vec3::new(0.0, f64::from(step), 0.0));
-    let colliders = gather(p, world, region);
-    let moved = collision::collide(motion, bb, p.on_ground, step, &colliders);
+    let moved = collision::collide_at(p, world, bb, p.on_ground, motion, step);
     let d = moved.x * moved.x + moved.y * moved.y + moved.z * moved.z;
     let want = motion.x * motion.x + motion.y * motion.y + motion.z * motion.z;
     if d > 1.0e-7 || want - d < 1.0e-7 {
