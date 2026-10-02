@@ -200,7 +200,15 @@ fn state_classes() -> &'static [u32] {
                 if class_name == "FenceGateBlock" {
                     f |= class::FENCE_GATE;
                 }
-                if class_name == "ScaffoldingBlock" || class_name == "PowderSnowBlock" {
+                // Shapes that depend on the entity (scaffolding, powder snow) or on the block's
+                // position (bamboo and pointed dripstone are offset by a position hash).
+                if matches!(
+                    class_name,
+                    "ScaffoldingBlock"
+                        | "PowderSnowBlock"
+                        | "BambooStalkBlock"
+                        | "PointedDripstoneBlock"
+                ) {
                     f |= class::CONTEXT_SHAPE;
                 }
                 if name == "minecraft:moving_piston" {
@@ -597,7 +605,13 @@ mod tests {
             assert_eq!(has(class::FENCE_GATE), block_class(b) == "FenceGateBlock");
             assert_eq!(
                 has(class::CONTEXT_SHAPE),
-                matches!(block_class(b), "ScaffoldingBlock" | "PowderSnowBlock")
+                matches!(
+                    block_class(b),
+                    "ScaffoldingBlock"
+                        | "PowderSnowBlock"
+                        | "BambooStalkBlock"
+                        | "PointedDripstoneBlock"
+                )
             );
             assert_eq!(
                 has(class::WATER_OR_BUBBLE_COLUMN),
