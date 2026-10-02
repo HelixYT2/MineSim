@@ -111,11 +111,16 @@ whose value is recorded. The machine-readable form is `ms_oracle::player::LAYOUT
 | 54–55 | `flying crouching` | u8 | `Abilities.flying`, `LocalPlayer.crouching` |
 
 The length is `328 + Σ (10 + len(id))` bytes over the active effects (383 for the test vector
-below). **Not hashed**, by design: the server's shadow copy of the velocity (`PlayerState::
-server_vel`; the client never observes it, and its effect reaches `dx dy dz` when knockback is
-delivered) and the attribute *modifier* lists (the oracle records values, which is all that
+below). **Not hashed**, by design: server-side and internal state the recording cannot show —
+the server's shadow copy of the velocity and the rest of the server-side player
+(`PlayerState::server_vel`, `PlayerState::server`) and the eye-fluid lookahead
+(`PlayerState::water_on_eyes`, copied into the recorded `eyeWater` one tick later); their effect
+reaches the hashed fields (`dx dy dz` when knockback is delivered, `eyeWater`, ...), where it is
+compared — and the attribute *modifier* lists (the oracle records values, which is all that
 influences anything). The derived queries `climbable` and `fallFlying` that the corpus also
-records are checked through their effects, not hashed.
+records are checked through their effects, not hashed. A new field of `PlayerState` must be added
+to the layout (a new contract version) or listed here as excluded: `serialize_player` destructures
+the state exhaustively, so the build fails until that decision is made.
 
 **Test vector.** The state with `x=4.5 y=-63 z=-2.5`, `dx=0 dy=-0.0784000015258789 dz=0.1`,
 `yaw=135 pitch=-22.5`, `ground=1 hc=0 mhc=1 vc=1 vcb=1`, `fall=2.5`, `water=0 eyeWater=1 lava=0`,

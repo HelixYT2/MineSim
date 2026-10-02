@@ -3,234 +3,272 @@
   "checkpoint_interval": 16,
   "contract": 1,
   "hash_seed": "0x4d494e4553494d00",
-  "locked": false,
+  "locked": true,
   "scenarios": {
     "bed_bounce": {
       "checkpoints": "26084ab1 034f8a76 a05b5db8 607d1881 66cd8e67 e5d8ab05 685d31e8",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x685d31e8998cd44b",
+      "sim": "0x685d31e8998cd44b",
       "ticks": 103
     },
     "bubble_columns": {
       "checkpoints": "c0a82621 2afc745a ef4375ad 027408e7 6b61c212 d1aba1e1 bf3b3e3f 262c8ae7 f78fe7dd cc5bc6d5 7e5dea3b b8e657cb 796ce00b",
       "frozen": false,
       "oracle": "0x796ce00b803a1ea6",
+      "sim": "0x7070b31938c15124",
       "ticks": 200
     },
     "cobweb_berries": {
       "checkpoints": "6b2917a3 2e372dbf 4d65d046 a5eb952d 9d27a8ba ef53a4e3 4f9b6611 8d67140c 3f3b7b87 84474f41 afdf69a5 6d2d6b2e d90c8221 1504d951 93ca6ddf",
       "frozen": false,
       "oracle": "0x93ca6ddfc1e51d4b",
+      "sim": "0x4206660918c46ef5",
       "ticks": 231
     },
     "crouch_tunnel": {
       "checkpoints": "949ee4ad 11961df7 35f3fb2f 4fc20e60 be702077 b3f0182b d9edddd3 0a62518c eed34c30",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xeed34c30d8bf578e",
+      "sim": "0xeed34c30d8bf578e",
       "ticks": 135
     },
     "effect_jump_boost": {
       "checkpoints": "97aeda98 6f84efbf 6348048c e9eeda5a 0975fe6e e589ef92 581d6c88 b2bea1ae 4b59802e b270bbb4 95e43d8f a6b6373e 7709c0ed 8f508022",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x8f508022d2a01a3e",
+      "sim": "0x8f508022d2a01a3e",
       "ticks": 215
     },
     "effect_levitation": {
       "checkpoints": "0d3bdf30 c23b02f1 0709e647 88ba1f05 8a64ca1c 817e83b6 98b07cee 6d959331 4b76cf12",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x4b76cf12e0003e7a",
+      "sim": "0x4b76cf12e0003e7a",
       "ticks": 140
     },
     "effect_slow_falling": {
       "checkpoints": "b1fbcf6c 6be9e06e e906abd2 48e0107e 6e2b0e6b c856c56e ba5467f0 0dd6d155 fdc9866d 5a077e1a b2f8f139 59255b76 8caed3fb",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x8caed3fb4406bb0a",
+      "sim": "0x8caed3fb4406bb0a",
       "ticks": 195
     },
     "effect_speed": {
       "checkpoints": "d9ffb9bb a78395bb b34153cd 5c3a65a1 b74b266d 022b6256 8f062d46 cb835800 615ec6d4 47af2eab 3ed7db1f df93f36f 217a82d6 8fef80ed a86e46d5",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xa86e46d5c14781fb",
+      "sim": "0xa86e46d5c14781fb",
       "ticks": 230
     },
     "fall_damage_16": {
       "checkpoints": "2d4900c3 7ab72019 5f56feb9 7b28a1ac d46d0164 598110b3 d0b6e49b",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xd0b6e49b3ff696d8",
+      "sim": "0xd0b6e49b3ff696d8",
       "ticks": 109
     },
     "fall_damage_4": {
       "checkpoints": "b376379f e26ef255 d0fbcb70 5077b484 d8376200",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xd8376200e92ae65c",
+      "sim": "0xd8376200e92ae65c",
       "ticks": 73
     },
     "fall_damage_8": {
       "checkpoints": "a6985f72 aa6d7785 9d7181a6 b99b0d79 a7c3969c c1b71773",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xc1b717739c7f0f52",
+      "sim": "0xc1b717739c7f0f52",
       "ticks": 85
     },
     "fall_into_water": {
       "checkpoints": "14778b03 c075f8d6 0f84b095 4ccc3fdc b33c86c2 6c5a191e 1f78142c 424089c9 c353d762",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xc353d762ef873818",
+      "sim": "0xc353d762ef873818",
       "ticks": 131
     },
     "fall_onto_hay": {
       "checkpoints": "cdd34d1f 06ce4d5b a9bcd901 e5284b5d 3ea0eeed 71bfdcba",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x71bfdcba06d14c5b",
+      "sim": "0x71bfdcba06d14c5b",
       "ticks": 81
     },
     "honey_soul_sand": {
       "checkpoints": "2a2c2f22 369dc592 ed7a23ac 3d40ee02 639278db 8e07ca3f 737bc522 298d79f6 18c9f648 3cf766a6 48a86e2f 5b8fe259 731a6926 5d7b57b5 6e36c9ec ac24e7e1",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xac24e7e19a82c266",
+      "sim": "0xac24e7e19a82c266",
       "ticks": 245
     },
     "ice_slip": {
       "checkpoints": "9880e26c 250216f9 60bfbd60 73ceecd6 5496a9e2 190dc878 cb783018 88ed9a58 990ca06d a9b65c0b 6bb82917 c250ff3d 878532be 36d0353c",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x36d0353cd29fbb6d",
+      "sim": "0x36d0353cd29fbb6d",
       "ticks": 220
     },
     "knockback_moving": {
       "checkpoints": "cad32fcc 8127a44f f85e1393 270fbe3b 16e644fc c93403f6 635dc9c6 90303128 3a5e49b8 bfe7e70a 0407d0d3",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x0407d0d331aefb3f",
+      "sim": "0x0407d0d331aefb3f",
       "ticks": 163
     },
     "knockback_standing": {
       "checkpoints": "388a347a deb025f0 fc781693 dae85cad bc25454b 4dbb64f6",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x4dbb64f63b198562",
+      "sim": "0x4dbb64f63b198562",
       "ticks": 90
     },
     "ladder_climb": {
       "checkpoints": "1095b491 b4585476 1445163e caa6fd92 ac1f329c eba3bb8e 0ccbd1ef 4bf71b90 e456208d 3bd44981 3b19c8b5 a7b7b1b0 31edc061 805df7a8 b5e80ecb 66898d6c df89e746 74b243e9 36e10113 007b8b58",
       "frozen": false,
       "oracle": "0x007b8b589f41fe12",
+      "sim": "0x00f0c5fce40d2147",
       "ticks": 310
     },
     "lava_pool": {
       "checkpoints": "809051e0 5439af25 405a8362 d06c6e4b 286b0c42 64f77dd4 d8c384f4 ac7dc1a3 d3a404e9 0b28aeee",
       "frozen": false,
       "oracle": "0x0b28aeeeda1cfcf1",
+      "sim": "0x1ec2602cb24ed7b0",
       "ticks": 160
     },
     "ledge_fall": {
       "checkpoints": "91680edd 6c259f61 4a6b1bcb c8d6dd2f 77b5bc6e 4aba22df a8cf8f52 a04aefa8 10b1681c 67edbcad",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x67edbcad652d119b",
+      "sim": "0x67edbcad652d119b",
       "ticks": 160
     },
     "legacy_capture": {
       "checkpoints": "d1be0c64 3aa2e2ec 1262d26d eeea80d7 8a6beb50 98064855 38564a57 a3f27cc7 91f0cfc7 3d459656 75b73187 5f78b2af e4f738c5 c65328d5 8f734d72 8d8a483e eecb8446 9af17286",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x9af1728665e41b79",
+      "sim": "0x9af1728665e41b79",
       "ticks": 280
     },
     "powder_snow": {
       "checkpoints": "a908fb71 00a93a39 285e2958 1033c13e 8279856a 16f31813 e43ac7b1 c64cbb30 38c5d939 8087795e 249e4f45 620bc30d",
       "frozen": false,
       "oracle": "0x620bc30d46d7e90c",
+      "sim": "0x6086ad64454d54c5",
       "ticks": 185
     },
     "projectile_flights": {
       "checkpoints": "67f4582f 77b932f9 a4344007 8c8c3de4 3539d0e4 25fdc977 6a338a52 738c515f 07f65893 ba36e69c 62b4f1f9 adc3d2cb 39f5800a 72a414d4 a3084d0b 44dcf99b 8f36b24d 2cde7e6f d9c0b5d9 c9d8dc67 e85d1d63 dc36fc9c c16698c9 75c722b4 352c615a",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x352c615af1cf7abb",
+      "sim": "0x352c615af1cf7abb",
       "ticks": 385
     },
     "projectile_hits": {
       "checkpoints": "b5548ca3 981af761 6e21746d 15dbf2a2 91c1b81f 3ed0a255 90781938 1771bf40 6f294cf5 c3747e7a",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xc3747e7aa8eeae11",
+      "sim": "0xc3747e7aa8eeae11",
       "ticks": 150
     },
     "random_course_a": {
       "checkpoints": "b49b2731 97ccefc2 8ecf9233 e6a56dda ce5de945 c0784bb9 5d923f1e f9e60854 f99e8862 5d5ae310 4a72c40d 1d5147d3 edea39b2 72a87370 9bf61353 d2d0fb25 6c848b0f fed53087 cf57b275 fc6d0f06 48695c28 539b7bf3 0b6bfdc7 479f5163 149e7759 9d5e5929 44bd9873 ea46bcf7 13299df7 79e241c2 8c1ece61 6e6bf9fb a8ad3d99 c734d1ae df7e7db2 8beb771c dad9118d 381f411b 0d280fb0 8df91eba",
       "frozen": false,
       "oracle": "0x8df91ebab89e2d37",
+      "sim": "0x5cf76fe97d610b8f",
       "ticks": 637
     },
     "random_course_b": {
       "checkpoints": "7410cf01 345ba685 dd3c8a1a 464a73f5 f41f712a ae68aa8a c322a2d8 16998ef9 6eae1837 2ffe195d 237f0005 606d5bc9 aae0c297 ae22542e 7e045017 9e477ad7 1aadad3d 89cfa541 97ce7bfc 4bea3ff3 81bfba2c 880ae426 97f669eb 75d6ceaa 8a79a0dc 8b3c9c8d 3c351411 3c2c60b8 aad64fbe ff895b6a 4cec3b9a 14b4ed78 87d06dbb 28cace6c 729f74da b7caf2d3 170c5971 26971987 a3a4684f 25cbb34d 6bc7f883",
       "frozen": false,
       "oracle": "0x6bc7f883689397eb",
+      "sim": "0xebea7205e7a0a815",
       "ticks": 651
     },
     "slime_block": {
       "checkpoints": "d5816456 c3653db6 7861ba0f c74de6b8 6b44b807 53bd8498 6a5c5f93 1db7ef7b ede5b49e 1e98e68f ee6ecd50 4e1d29cc 2c703aa2 b24f3782 1f6aa608 e1cf198e e3e8404b",
       "frozen": false,
       "oracle": "0xe3e8404bb7ff6202",
+      "sim": "0x1cacfbd7e8bfa66e",
       "ticks": 270
     },
     "sneak_edges": {
       "checkpoints": "8b488080 fe159ec0 5696e09f d5e63e6c d0190ffd 070b36d7 50a5dfab fbe34f9d 2843f3bc 237c607c a10b19c0 b905fa6c 66a95268 2e2e0b03 75b6c5f3 c3e07cbd 78ca1c1b 8a511f74 6dfe917f 2d5338db 71fe98e6 5765bea1 a45332b2 ed627c91 2139a2b2 677cc677 ce7c335b a1bf6f3a 65e925c0 37373023 0208dbd0 1688eea9 51f1eacd 22d2425a 21852d0f",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x21852d0fb5110603",
+      "sim": "0x21852d0fb5110603",
       "ticks": 550
     },
     "sprint_hungry": {
       "checkpoints": "159775a0 9d3ecff3 0cf73892 5ca70f5e 680fd333",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x680fd33353dce231",
+      "sim": "0x680fd33353dce231",
       "ticks": 78
     },
     "sprint_jump": {
       "checkpoints": "6cd2dbb2 df2764ac 347566f4 9e095b28 ed0b673e 8b4d7f58 729dac02 527636ae 231a7e7e a2c47bb3 39debfd1 8f9ec507 3d463a35 0f9f2f02 0717cd30 20f2026a",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x20f2026a5013ffc2",
+      "sim": "0x20f2026a5013ffc2",
       "ticks": 250
     },
     "sprint_rules": {
       "checkpoints": "e202eaa3 637ab3d7 3304fe67 8cfd9423 10b928fd 53bb6104 8af1db3d 6a86af72 17c0d42a f9bbe919 15ffbd6c a798369d 84295031",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x842950316148a9ce",
+      "sim": "0x842950316148a9ce",
       "ticks": 193
     },
     "steps_course": {
       "checkpoints": "a1121ebc 44a7765a cd10db24 e95137be d60133ad 07d26bc8 2c8603c6 4aeabb54 bc455570 14ee5318 f646e80d 20801310 d2b08a6c 9dfa21ab c89d114d 310a96a9 e0ea00dc 16a9b894 bf138af4 f572b8c1",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xf572b8c151dfafe2",
+      "sim": "0xf572b8c151dfafe2",
       "ticks": 305
     },
     "vines_scaffolding": {
       "checkpoints": "6c4018c2 ee3ee9fa d0400f67 264c4616 8181d966 f4302259 bfc30572 1e9de21a 4775c3a5 85ee884b 2601c6e6 01971972 9def5c68 48a71a77 40830c8a 3ac8d4f7 7048c17b c7d069e3 7935ac91 c89f282c 0fa88c72 89b2690f",
       "frozen": false,
       "oracle": "0x89b2690ffae06b96",
+      "sim": "0x23b34299ac3cb267",
       "ticks": 350
     },
     "walk_basic": {
       "checkpoints": "1302cd08 bba8e6a9 a9d587ce 212fee3b dccf88e4 939a1c49 2a8d88a6 a9365cea c98292a0 b088e4b1 0980e057 e3c02b4f 8ff1b74b 42d074cb d283ff55 b0b6a3ad 3c656dff b5eea7c6 550ed399",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x550ed3991e4d4c63",
+      "sim": "0x550ed3991e4d4c63",
       "ticks": 300
     },
     "wall_slide": {
       "checkpoints": "0a3bc685 228c9b2a e22c8b06 8e2bf500 9b29eff1 f6f3cccc a03ce82b ecf751a3 23d26bed 9e961cff c5c32364 edda67af 187b9edb 093260f9",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x093260f9552b10e8",
+      "sim": "0x093260f9552b10e8",
       "ticks": 215
     },
     "water_flow": {
       "checkpoints": "57bfdd3e 38737fd8 ceebfb69 1d271da9 3f46e047 9c234f79 6af5873f 4442b3e3 ac968ba1 7fbedc0c",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x7fbedc0ca5273c00",
+      "sim": "0x7fbedc0ca5273c00",
       "ticks": 160
     },
     "water_pool": {
       "checkpoints": "45d3cec5 880b3ad2 c340c68d 84e72656 42de43a1 86a46c57 41a0ce06 7a21aa85 74d92968 12b81af8 7802c0ee 48d6fe10 2acd951e 62c8e8db 4cf7a615 1ad9a97a",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x1ad9a97a7e5b45df",
+      "sim": "0x1ad9a97a7e5b45df",
       "ticks": 245
     },
     "water_swim": {
       "checkpoints": "eda58b9a a2065122 2c494bd3 c5376734 21d4e492 e35d58ec 050bf076 3fdfa7b0 7b90bddd 6dd3b1e9 9f10cb24 d44591a3 c1e13206",
       "frozen": false,
       "oracle": "0xc1e132068d298806",
+      "sim": "0x76404935f079624e",
       "ticks": 200
     }
   }
