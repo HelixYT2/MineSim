@@ -467,6 +467,95 @@ mod tests {
         assert_eq!(signum(-0.0).to_bits(), (-0.0_f64).to_bits());
     }
 
+    fn floor_world(blocks: &[(&str, (i32, i32, i32))]) -> World {
+        let mut grid = ms_world::GridWorld::new(ms_world::FlatWorld::new(0, ms_data::AIR));
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        grid.fill((-4, -1, -4), (4, -1, 4), stone);
+        for (name, (x, y, z)) in blocks {
+            grid.set_block(*x, *y, *z, ms_data::parse_state(name).unwrap());
+        }
+        World::grid(grid)
+    }
+
+    fn standing(x: f64, z: f64, world: &World) -> PlayerState {
+        let mut p = PlayerState::new(Vec3::new(x, 0.0, z), 0.0);
+        p.on_ground = true;
+        check_supporting_block(&mut p, world, true, None);
+        p
+    }
+
+    #[test]
+    fn supporting_block_is_the_nearest_to_the_feet() {
+        // Straddling the seam between two blocks: the one whose centre is closer wins.
+        let world = floor_world(&[]);
+        let p = standing(0.9, 0.5, &world);
+        assert_eq!(p.supporting_block, Some((0, -1, 0)));
+        let p = standing(1.1, 0.5, &world);
+        assert_eq!(p.supporting_block, Some((1, -1, 0)));
+        // Exactly on the seam: equal distances resolve towards the greater block position.
+        let p = standing(1.0, 0.5, &world);
+        assert_eq!(p.supporting_block, Some((1, -1, 0)));
+        // In mid-air there is no supporting block.
+        let mut q = PlayerState::new(Vec3::new(0.5, 3.0, 0.5), 0.0);
+        check_supporting_block(&mut q, &world, false, None);
+        assert_eq!(q.supporting_block, None);
+    }
+
+    #[test]
+    fn fences_are_their_own_top_for_the_legacy_position() {
+        // Standing on top of a fence (1.5 high): the supporting block is the fence itself, and for
+        // the legacy 0.2 lookup the position 0.2 below the feet (block y = 1) is NOT used.
+        let world = floor_world(&[("minecraft:oak_fence", (0, 0, 0))]);
+        let mut p = PlayerState::new(Vec3::new(0.5, 1.5, 0.5), 0.0);
+        p.on_ground = true;
+        check_supporting_block(&mut p, &world, true, None);
+        assert_eq!(p.supporting_block, Some((0, 0, 0)));
+        assert_eq!(on_pos(&p, &world, 0.2), (0, 0, 0));
+        // The 0.500001 lookup (used for friction) takes the block below the feet position instead.
+        assert_eq!(on_pos(&p, &world, 0.500_001), (0, 0, 0));
+        // Without a supporting block the position decides.
+        p.supporting_block = None;
+        assert_eq!(on_pos(&p, &world, 0.2), (0, 1, 0));
+        let stone_world = floor_world(&[]);
+        let q = standing(0.5, 0.5, &stone_world);
+        assert_eq!(on_pos(&q, &stone_world, 0.2), (0, -1, 0));
+        assert_eq!(on_pos(&q, &stone_world, 1.0E-5), (0, -1, 0));
+    }
+
+    #[test]
+    fn stuck_multiplier_scales_one_move_and_is_consumed() {
+        let world = World::void();
+        let mut p = PlayerState::new(Vec3::new(0.5, 10.0, 0.5), 0.0);
+        p.stuck_speed_multiplier = Vec3::new(0.25, 0.05, 0.25);
+        p.vel = Vec3::new(0.2, -0.1, 0.2);
+        move_entity(&mut p, &world, Vec3::new(0.2, -0.1, 0.2));
+        assert_eq!(p.pos.x, 0.5 + 0.2 * 0.25);
+        assert_eq!(p.pos.y, 10.0 + -0.1 * 0.05);
+        assert_eq!(p.stuck_speed_multiplier, Vec3::ZERO);
+        assert_eq!(
+            p.vel,
+            Vec3::ZERO,
+            "the velocity is cancelled along with the multiplier"
+        );
+    }
+
+    #[test]
+    fn falling_accumulates_distance_and_landing_resets_it() {
+        let world = floor_world(&[]);
+        let mut p = PlayerState::new(Vec3::new(0.5, 5.0, 0.5), 0.0);
+        for _ in 0..40 {
+            let v = p.vel;
+            move_entity(&mut p, &world, v);
+            p.vel.y = (p.vel.y - 0.08) * f64::from(0.98_f32);
+            if p.on_ground {
+                break;
+            }
+        }
+        assert!(p.on_ground);
+        assert_eq!(p.fall_distance, 0.0);
+        assert_eq!(p.pos.y, 0.0);
+    }
+
     #[test]
     fn segment_box_test() {
         let b = aabb(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);

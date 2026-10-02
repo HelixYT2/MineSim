@@ -116,12 +116,50 @@ fn suffocates_at(p: &PlayerState, world: &World, x: i32, z: i32) -> bool {
     collision::collides_with_suffocating_block(world, p, aabb_deflate(col, 1.0E-7))
 }
 
+/// `suffocatesAt` answers for the block columns asked about so far this tick. The position (and so
+/// the answers) cannot change while the four wall-push checks run, and the corners of the box
+/// usually share one column, so each column is looked up once.
+struct SuffocationCache {
+    entries: [(i32, i32, bool); 16],
+    len: usize,
+}
+
+impl SuffocationCache {
+    fn new() -> Self {
+        Self {
+            entries: [(0, 0, false); 16],
+            len: 0,
+        }
+    }
+
+    fn at(&mut self, p: &PlayerState, world: &World, x: i32, z: i32) -> bool {
+        if let Some(&(_, _, hit)) = self.entries[..self.len]
+            .iter()
+            .find(|&&(cx, cz, _)| cx == x && cz == z)
+        {
+            return hit;
+        }
+        let hit = suffocates_at(p, world, x, z);
+        if self.len < self.entries.len() {
+            self.entries[self.len] = (x, z, hit);
+            self.len += 1;
+        }
+        hit
+    }
+}
+
 /// `LocalPlayer.moveTowardsClosestSpace(x, z)`: if the point is inside a suffocating block, nudge
 /// the velocity towards the nearest side that is free.
-fn move_towards_closest_space(p: &mut PlayerState, world: &World, x: f64, z: f64) {
+fn move_towards_closest_space(
+    p: &mut PlayerState,
+    world: &World,
+    cache: &mut SuffocationCache,
+    x: f64,
+    z: f64,
+) {
     let bx = floor(x);
     let bz = floor(z);
-    if suffocates_at(p, world, bx, bz) {
+    if cache.at(p, world, bx, bz) {
         let f = x - f64::from(bx);
         let g = z - f64::from(bz);
         // (dx, dz, step) for WEST, EAST, NORTH, SOUTH; `i` is the choose() of the axis.
@@ -135,7 +173,7 @@ fn move_towards_closest_space(p: &mut PlayerState, world: &World, x: f64, z: f64
         let mut h = f64::MAX;
         for (dx, dz, positive, i) in candidates {
             let j = if positive { 1.0 - i } else { i };
-            if j < h && !suffocates_at(p, world, bx + dx, bz + dz) {
+            if j < h && !cache.at(p, world, bx + dx, bz + dz) {
                 h = j;
                 best = Some((dx, dz));
             }
@@ -163,26 +201,57 @@ fn local_player_ai_step(p: &mut PlayerState, world: &World, input: &Input, old_p
     // exactly when `zza` (a positive multiple of it) is.
     let had_forward_impulse = p.zza > 0.0;
 
+    // crouching = !flying && !swimming && fits(CROUCHING) && (shift || !fits(STANDING)), with the
+    // two box queries ordered so that the second is skipped whenever the answer is already known
+    // (standing room means not crouching; otherwise only the crouching box decides).
     p.crouching = !p.flying
         && !is_swimming(p)
-        && can_fit_in_pose(p, world, Pose::Crouching)
-        && (p.shift_key_down || !can_fit_in_pose(p, world, Pose::Standing));
+        && if p.shift_key_down {
+            can_fit_in_pose(p, world, Pose::Crouching)
+        } else {
+            !can_fit_in_pose(p, world, Pose::Standing) && can_fit_in_pose(p, world, Pose::Crouching)
+        };
 
     // input.tick()
     let move_vector = keyboard_move_vector(input);
     p.shift_key_down = input.shift;
     let forward_impulse = has_forward_impulse(move_vector);
 
+    let mut suffocation = SuffocationCache::new();
     // if (!noPhysics) moveTowardsClosestSpace at the four corners of the box (0.35 of the width)
     let width = f64::from(p.dimensions().0);
     let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(p, world, px - width * 0.35, pz + width * 0.35);
+    move_towards_closest_space(
+        p,
+        world,
+        &mut suffocation,
+        px - width * 0.35,
+        pz + width * 0.35,
+    );
     let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(p, world, px - width * 0.35, pz - width * 0.35);
+    move_towards_closest_space(
+        p,
+        world,
+        &mut suffocation,
+        px - width * 0.35,
+        pz - width * 0.35,
+    );
     let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(p, world, px + width * 0.35, pz - width * 0.35);
+    move_towards_closest_space(
+        p,
+        world,
+        &mut suffocation,
+        px + width * 0.35,
+        pz - width * 0.35,
+    );
     let (px, pz) = (p.pos.x, p.pos.z);
-    move_towards_closest_space(p, world, px + width * 0.35, pz + width * 0.35);
+    move_towards_closest_space(
+        p,
+        world,
+        &mut suffocation,
+        px + width * 0.35,
+        pz + width * 0.35,
+    );
 
     if was_shift || input.back {
         p.sprint_trigger_time = 0;
@@ -261,16 +330,21 @@ fn desired_pose(p: &PlayerState) -> Pose {
 /// `Player.updatePlayerPose`: the pose follows the input, unless the box of the wanted pose does not
 /// fit (then crouching, or swimming/crawling, whichever fits).
 fn update_player_pose(p: &mut PlayerState, world: &World) {
+    // The reference first checks that the swimming box (the smallest) fits at all, then which pose
+    // fits. The boxes are nested (swimming inside crouching inside standing, same footprint), so
+    // when the wanted pose fits, the swimming box necessarily does too and that first query is
+    // skipped; otherwise the queries run in the reference's order, without repeating the one that
+    // just failed.
+    let desired = desired_pose(p);
+    if desired != Pose::Swimming && can_fit_in_pose(p, world, desired) {
+        p.pose = desired;
+        return;
+    }
     if can_fit_in_pose(p, world, Pose::Swimming) {
-        let pose = desired_pose(p);
-        let pose2 = if can_fit_in_pose(p, world, pose) {
-            pose
-        } else if can_fit_in_pose(p, world, Pose::Crouching) {
-            Pose::Crouching
-        } else {
-            Pose::Swimming
+        p.pose = match desired {
+            Pose::Standing if can_fit_in_pose(p, world, Pose::Crouching) => Pose::Crouching,
+            _ => Pose::Swimming,
         };
-        p.pose = pose2;
     }
 }
 
@@ -509,6 +583,128 @@ mod tests {
             "too few undisturbed ticks: {close}/{qualifying}"
         );
         assert_eq!(exact, close, "worst undisturbed error {worst_close:e}");
+    }
+
+    #[test]
+    fn a_player_inside_a_wall_is_pushed_towards_the_nearest_free_side() {
+        let mut grid = ms_world::GridWorld::new(ms_world::FlatWorld::new(0, ms_data::AIR));
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        grid.fill((-5, -1, -5), (5, -1, 5), stone);
+        // A 1x2x1 column at (0, 0, 0): the player's centre is in it, a little to the east of centre.
+        grid.fill((0, 0, 0), (0, 1, 0), stone);
+        let world = World::grid(grid);
+        let mut p = PlayerState::new(Vec3::new(0.65, 0.0, 0.5), 0.0);
+        let idle = Input::default();
+        let (x, z) = (p.pos.x, p.pos.z);
+        // The corner at (west, south) is 0.29 from the south face, the nearest free side.
+        let w = f64::from(p.dimensions().0);
+        move_towards_closest_space(
+            &mut p,
+            &world,
+            &mut SuffocationCache::new(),
+            x - w * 0.35,
+            z + w * 0.35,
+        );
+        assert_eq!((p.vel.x, p.vel.z), (0.0, 0.1));
+        // The (east, north) corner is 0.14 from the east face.
+        move_towards_closest_space(
+            &mut p,
+            &world,
+            &mut SuffocationCache::new(),
+            x + w * 0.35,
+            z - w * 0.35,
+        );
+        assert_eq!((p.vel.x, p.vel.z), (0.1, 0.1));
+        // Over a few ticks the nudge carries the player out of the column.
+        p.vel = Vec3::ZERO;
+        for _ in 0..30 {
+            tick(&mut p, &idle, &world);
+        }
+        let bb = collision::bounding_box(&p);
+        assert!(
+            bb.min.x >= 1.0 - 1e-6
+                || bb.max.x <= 0.0 + 1e-6
+                || bb.min.z >= 1.0 - 1e-6
+                || bb.max.z <= 1e-6,
+            "still inside the column: {:?}",
+            p.pos
+        );
+    }
+
+    /// Random keys over a rough world of assorted blocks never panics (debug overflow checks are on
+    /// in tests) and never produces a non-finite state; the run is deterministic.
+    #[test]
+    fn random_inputs_over_rough_terrain_stay_finite_and_deterministic() {
+        let names = [
+            "minecraft:stone",
+            "minecraft:oak_stairs[facing=east,half=bottom,shape=straight]",
+            "minecraft:oak_slab[type=bottom]",
+            "minecraft:oak_slab[type=top]",
+            "minecraft:oak_fence",
+            "minecraft:cobblestone_wall",
+            "minecraft:glass_pane",
+            "minecraft:ice",
+            "minecraft:snow[layers=3]",
+            "minecraft:oak_trapdoor[half=top,open=false,facing=north]",
+        ];
+        let mut rng = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        let mut grid = ms_world::GridWorld::new(ms_world::FlatWorld::new(0, stone));
+        for _ in 0..180 {
+            let (x, z) = ((next() % 25) as i32 - 12, (next() % 25) as i32 - 12);
+            let y = (next() % 3) as i32;
+            let name = names[(next() % names.len() as u64) as usize];
+            grid.set_block(x, y, z, ms_data::parse_state(name).unwrap());
+        }
+        let world = World::grid(grid);
+        let run = |seed: u64| {
+            let mut r = seed;
+            let mut step = move || {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                r
+            };
+            let mut p = PlayerState::new(Vec3::new(0.5, 3.0, 0.5), 0.0);
+            let mut yaw = 0.0_f32;
+            let mut input = Input::default();
+            for t in 0..2500 {
+                if t % 5 == 0 {
+                    let k = step();
+                    input = Input {
+                        forward: k & 1 != 0,
+                        back: k & 2 != 0 && k & 4 != 0,
+                        left: k & 8 != 0,
+                        right: k & 16 != 0 && k & 32 != 0,
+                        jump: k & 64 != 0,
+                        shift: k & 128 != 0 && k & 256 != 0,
+                        sprint: k & 512 != 0,
+                        ..Input::default()
+                    };
+                    yaw = ((step() % 7200) as f32) / 10.0 - 360.0;
+                }
+                input.yaw = yaw;
+                tick(&mut p, &input, &world);
+                assert!(
+                    p.pos.x.is_finite() && p.pos.y.is_finite() && p.pos.z.is_finite(),
+                    "tick {t}: {:?}",
+                    p.pos
+                );
+                assert!(p.vel.x.is_finite() && p.vel.y.is_finite() && p.vel.z.is_finite());
+                assert!(p.pos.x.abs() < 5000.0 && p.pos.z.abs() < 5000.0 && p.pos.y > -1.0);
+            }
+            (p.pos.x.to_bits(), p.pos.y.to_bits(), p.pos.z.to_bits())
+        };
+        for seed in [1_u64, 7] {
+            assert_eq!(run(seed), run(seed));
+        }
+        let _ = next();
     }
 
     #[test]

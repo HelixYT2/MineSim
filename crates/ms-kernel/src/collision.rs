@@ -583,9 +583,14 @@ fn gather(
     let y1 = floor(query.max.y + EPSILON) + 1;
     let z0 = floor(query.min.z - EPSILON) - 1;
     let z1 = floor(query.max.z + EPSILON) + 1;
-    for z in z0..=z1 {
-        for y in y0..=y1 {
-            for x in x0..=x1 {
+    // Everything above a flat world's floor is air: those rows need not be visited.
+    let y_last = match world {
+        World::Flat(f) => y1.min(f.surface_y().saturating_sub(1)),
+        _ => y1,
+    };
+    for z in z0..z1 + 1 {
+        for y in y0..y_last.saturating_add(1) {
+            for x in x0..x1 + 1 {
                 // Cursor3D type: how many coordinates are on the outer ring.
                 let kind = i32::from(x == x0 || x == x1)
                     + i32::from(y == y0 || y == y1)
