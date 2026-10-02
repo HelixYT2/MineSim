@@ -308,5 +308,7 @@ fn every_other_scenario_is_exact_including_the_freeze_slowdown() {
         assert!(rep.mismatch_rows.is_empty(), "{name}: {:?}", rep.mismatches);
     }
     println!("{total} other scenarios reproduce effects and attributes exactly");
-    assert!(total >= 30);
+    // Every recorded scenario is in one list or the other: no carve-outs (the freeze slowdown of
+    // `powder_snow_freeze`, `powder_snow` and `ladder_climb` is modelled), none skipped.
+    assert_eq!(total, client_scenarios().len() - REQUIRED.len());
 }

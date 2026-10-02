@@ -287,16 +287,16 @@
     },
     "lava_flow": {
       "checkpoints": "dcf55645 b4632672 bde4692a 1c96a01e bb8d1a68 44f47b37 b97d1e53 4ca98271 163fc075",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x163fc07517e66e3e",
-      "sim": "0x0e8cf6d6f466e981",
+      "sim": "0x163fc07517e66e3e",
       "ticks": 130
     },
     "lava_lanes": {
       "checkpoints": "b339de8e e942f8da 94475bd8 c95c5d60 b2811010 ce70113b ae33d034 5c5e5d8e ccb1580c d197ba3f 5cedd4d5 8c9a3a9e 1a5c7a6f 519d17eb 504da4e7",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x504da4e7ce2ad4a9",
-      "sim": "0xfaa025b6cf912b31",
+      "sim": "0x504da4e7ce2ad4a9",
       "ticks": 228
     },
     "lava_pool": {

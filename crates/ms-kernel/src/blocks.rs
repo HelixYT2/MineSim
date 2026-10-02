@@ -25,12 +25,13 @@
 //!
 //! What is deliberately not modelled (documented here so the integrator knows the boundary):
 //!
-//! * Fire, lava, campfire and cactus contact (`FIRE_IGNITE`, `LAVA_IGNITE`, `lavaHurt`, `inFire`,
-//!   `campfire` damage), and the water fluid's `EXTINGUISH`: they need the server's RNG (ignition
-//!   draws from `level.random`) and damage sources the damage module does not have yet. On the
-//!   client the fire counter is cleared every tick anyway. The step-based collector below has the
-//!   machinery (per-step de-duplication, enum-ordered application) and only the effects powder
-//!   snow raises are wired up.
+//! * Fire, campfire and cactus contact (`FIRE_IGNITE`, `inFire`, `campfire` damage): they need the
+//!   server's RNG (ignition draws from `level.random`) and damage sources the damage module does not
+//!   have. Lava and water are in: the client's visit ignites on lava (the counter it clears again
+//!   at the start of its next tick) and the fluids' `EXTINGUISH`; the damage of lava and sweet berry
+//!   bushes is the server's, found by [`server_inside_events`] and applied by
+//!   `damage::server_do_tick`. The step-based collector below has the machinery (per-step
+//!   de-duplication, enum-ordered application).
 //! * Redstone-ish and world-mutating block reactions (pressure plates, buttons, tripwires, big
 //!   dripleaf tilting, farmland trampling and turtle eggs on `fallOn`, sculk sensors, redstone ore
 //!   on `stepOn`, portals): they change the world, not the player.
@@ -46,7 +47,7 @@
 //! * The `hot_floor` damage of magma is the server's too (the client's `hurt` does nothing): see
 //!   [`is_hot_floor`] and `damage::server_do_tick`.
 
-use crate::damage::{self, DamageSource};
+use crate::damage;
 use crate::state::{PlayerState, Pose};
 use ms_numerics::Vec3;
 use ms_world::aabb::Aabb;
@@ -187,6 +188,8 @@ enum Kind {
     PointedDripstone,
     TrapDoor,
     FenceGate,
+    /// `LiquidBlock` (water, lava).
+    Liquid,
 }
 
 /// Everything the behaviours look up about a block state, resolved once per state.
@@ -220,6 +223,7 @@ fn classify(block: usize) -> Info {
         // `instanceof TrapDoorBlock` also holds for the copper variants.
         "TrapDoorBlock" | "WeatheringCopperTrapDoorBlock" => Kind::TrapDoor,
         "FenceGateBlock" => Kind::FenceGate,
+        "LiquidBlock" => Kind::Liquid,
         _ => Kind::Other,
     };
     Info {
@@ -636,6 +640,11 @@ impl MovementLog {
         self.entries.len()
     }
 
+    /// The recorded moves, oldest first.
+    pub fn entries(&self) -> &[Movement] {
+        &self.entries
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -702,10 +711,6 @@ impl InsideEffect {
             InsideEffect::ClearFreeze => crate::fluids::clear_freeze(p),
             InsideEffect::LavaIgnite => {
                 crate::fluids::lava_ignite(p);
-                // runAfter(LAVA_IGNITE, Entity::lavaHurt): server-side fire damage.
-                if !p.effects.has("minecraft:fire_resistance") {
-                    damage::hurt(p, DamageSource::Generic, 4.0);
-                }
             }
             InsideEffect::Extinguish => {
                 p.remaining_fire_ticks = p.remaining_fire_ticks.min(0);
@@ -746,28 +751,35 @@ impl Collector {
         self.in_step |= effect.bit();
     }
 
-    fn apply_and_clear(&mut self, p: &mut PlayerState) {
+    /// `StepBasedCollector.applyAndClear` without the application: flush the last step and hand
+    /// over every queued effect in the order the game applies them.
+    fn drain(&mut self) -> Vec<InsideEffect> {
         self.flush_step();
-        for effect in std::mem::take(&mut self.queued) {
+        self.last_step = None;
+        std::mem::take(&mut self.queued)
+    }
+
+    fn apply_and_clear(&mut self, p: &mut PlayerState) {
+        for effect in self.drain() {
             if !p.is_alive() {
                 break;
             }
             effect.apply(p);
         }
-        self.last_step = None;
     }
 }
 
 /// `Entity.applyEffectsFromBlocks()`: the effects of every block the player's box passed through
 /// this tick, in the game's visiting order. `log` holds the moves `Entity.move` recorded; it is
 /// emptied. `old_pos` is the position the tick started at (`oldPosition`): it stands in for the
-/// move when none was recorded, and is the base of the movement the sweet berry bush judges.
-/// Call [`step_on`] first when the player is on the ground, as the game does.
+/// move when none was recorded. Call [`step_on`] first when the player is on the ground, as the
+/// game does.
 ///
-/// The visit applies, per block: cobweb, sweet berry bush and powder snow set the stuck-speed
-/// multiplier (and reset the fall distance), powder snow raises the freeze effect, the honey
-/// block makes a player sliding down its side crawl, and bubble columns push (see the module
-/// documentation for what is left out).
+/// This is the *client's* visit. It applies, per block: cobweb, sweet berry bush and powder snow
+/// set the stuck-speed multiplier (and reset the fall distance), powder snow raises the freeze
+/// effect, lava ignites the player (the fire counter the client clears again at the start of its
+/// next tick), the honey block makes a player sliding down its side crawl, and bubble columns push.
+/// The damage of lava and sweet berry bushes is the server's; see [`server_inside_events`].
 pub fn apply_effects_from_blocks(
     p: &mut PlayerState,
     world: &World,
@@ -785,7 +797,7 @@ pub fn apply_effects_from_blocks(
             }
         }
     }
-    check_inside_blocks(p, world, &moves, old_pos);
+    check_inside_blocks(p, world, &moves);
     // Reuse the log's allocation for the next tick.
     moves.clear();
     log.entries = moves;
@@ -795,53 +807,151 @@ pub fn apply_effects_from_blocks(
 /// information), as used for moves the game does not record itself. `from` doubles as the old
 /// position.
 pub fn apply_effects_from_segment(p: &mut PlayerState, world: &World, from: Vec3, to: Vec3) {
-    check_inside_blocks(p, world, &[Movement::new(from, to, None)], from);
+    check_inside_blocks(p, world, &[Movement::new(from, to, None)]);
 }
 
 /// `Entity.checkInsideBlocks(list, collector)` followed by the collector's `applyAndClear`.
-fn check_inside_blocks(p: &mut PlayerState, world: &World, moves: &[Movement], old_pos: Vec3) {
+fn check_inside_blocks(p: &mut PlayerState, world: &World, moves: &[Movement]) {
     let mut walk = Walk {
         p,
         world,
-        old_pos,
         collector: Collector::default(),
         visited: Vec::new(),
+        server: None,
     };
-    for m in moves {
-        let mut from = m.from;
-        let delta = sub(m.to, m.from);
-        let mut budget = 16;
-        match m.original {
-            Some(original) if length_sqr(delta) > 0.0 => {
-                for axis in axis_step_order(original) {
-                    let d = axis_value(delta, axis);
-                    if d != 0.0 {
-                        let next = relative(from, axis, d);
-                        budget -= walk.check_segment(from, next, budget);
-                        from = next;
-                    }
-                }
-            }
-            _ => budget -= walk.check_segment(m.from, m.to, 16),
-        }
-        if budget <= 0 {
-            walk.check_segment(m.to, m.to, 1);
-        }
-    }
+    walk.visit_moves(moves);
     let Walk {
         p, mut collector, ..
     } = walk;
     collector.apply_and_clear(p);
 }
 
+/// What the *server's* `Entity.applyEffectsFromBlocks` raises for the player, in the order the game
+/// applies it. Only the effects that act on the server alone are listed: damage, and the server's
+/// own fire counter. (The freeze effects and the bubble columns' pushes are counted from the
+/// client's visit, see `damage::note_freeze_step` and `damage::note_bubble_column`.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerInsideEvent {
+    /// `SweetBerryBushBlock.entityInside`: a grown bush hurts (1.0, not fire) a player the server
+    /// knows to have moved horizontally. Raised at once while the blocks are visited.
+    BerryHurt,
+    /// The `LAVA_IGNITE` effect: `Entity.lavaIgnite` (on fire for 15 seconds, thaw), then
+    /// `Entity.lavaHurt` (4.0 of fire damage). Deferred until the visit is over.
+    LavaIgnite,
+    /// The `EXTINGUISH` effect of water and powder snow: `Entity.clearFire`.
+    Extinguish,
+}
+
+/// What a server-side visit adds to the [`Walk`]: the movement the server was last told about (for
+/// the berry bush) and the events raised so far.
+struct ServerWalk {
+    known_movement: Vec3,
+    events: Vec<ServerInsideEvent>,
+}
+
+/// `Entity.applyEffectsFromBlocks(list)` run for the player's server copy: the blocks its box
+/// passed through along `moves` (the move packets handled since the server's last tick, then its
+/// own `travel`), judged with the server's `known_movement` (`ServerPlayer.getKnownMovement`, the
+/// displacement of the last move packet, zero when the client sent none this tick). Nothing of
+/// `p` is changed: the caller applies the returned events to the server's copy.
+pub fn server_inside_events(
+    p: &mut PlayerState,
+    world: &World,
+    moves: &[Movement],
+    known_movement: Vec3,
+) -> Vec<ServerInsideEvent> {
+    if !server_visit_can_matter(p, world, moves) {
+        return Vec::new();
+    }
+    let mut walk = Walk {
+        p,
+        world,
+        collector: Collector::default(),
+        visited: Vec::new(),
+        server: Some(ServerWalk {
+            known_movement,
+            events: Vec::new(),
+        }),
+    };
+    walk.visit_moves(moves);
+    let Walk {
+        mut collector,
+        server,
+        ..
+    } = walk;
+    let mut events = server.map(|s| s.events).unwrap_or_default();
+    for effect in collector.drain() {
+        match effect {
+            InsideEffect::LavaIgnite => events.push(ServerInsideEvent::LavaIgnite),
+            InsideEffect::Extinguish => events.push(ServerInsideEvent::Extinguish),
+            InsideEffect::Freeze | InsideEffect::ClearFreeze => {}
+        }
+    }
+    events
+}
+
+/// Whether the server's visit of `moves` can raise anything at all: some block of the region the
+/// player's box covers along them holds a fluid, a sweet berry bush or powder snow. The region is
+/// the box hull of every move's two ends, which contains every block the visit can reach, so an
+/// answer of no is exact and spares the walk (and its allocations) in the common case.
+fn server_visit_can_matter(p: &PlayerState, world: &World, moves: &[Movement]) -> bool {
+    // Every cell the box can reach lies above the world's highest block: all air.
+    let lowest = moves
+        .iter()
+        .flat_map(|m| [m.from.y, m.to.y])
+        .fold(f64::INFINITY, f64::min);
+    if jfloor(lowest) > world.max_block_y() {
+        return false;
+    }
+    let (w, h) = p.dimensions();
+    let half = f64::from(w / 2.0_f32);
+    let height = f64::from(h);
+    let (mut lo, mut hi) = (
+        Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+    );
+    for m in moves {
+        for v in [m.from, m.to] {
+            lo = Vec3::new(lo.x.min(v.x - half), lo.y.min(v.y), lo.z.min(v.z - half));
+            hi = Vec3::new(
+                hi.x.max(v.x + half),
+                hi.y.max(v.y + height),
+                hi.z.max(v.z + half),
+            );
+        }
+    }
+    if !(lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z) {
+        return true;
+    }
+    // Cells above the world's highest block are air.
+    let top = jfloor(hi.y).min(world.max_block_y());
+    for x in jfloor(lo.x)..=jfloor(hi.x) {
+        for y in jfloor(lo.y)..=top {
+            for z in jfloor(lo.z)..=jfloor(hi.z) {
+                let state = world.block_state(x, y, z);
+                if state == ms_data::AIR {
+                    continue;
+                }
+                if !ms_data::fluid(state).is_empty()
+                    || matches!(info(state).kind, Kind::SweetBerryBush | Kind::PowderSnow)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// The state of one `checkInsideBlocks` run.
 struct Walk<'a> {
     p: &'a mut PlayerState,
     world: &'a World,
-    old_pos: Vec3,
     collector: Collector,
     /// Blocks whose `entityInside` already ran this tick (`visitedBlocks`).
     visited: Vec<(i32, i32, i32)>,
+    /// Set for the server's visit, which only collects events and leaves the player alone.
+    server: Option<ServerWalk>,
 }
 
 /// The player's bounding box with its feet at `pos` (`Entity.makeBoundingBox(Vec3)`).
@@ -855,6 +965,33 @@ fn bounding_box_at(p: &PlayerState, pos: Vec3) -> Aabb {
 }
 
 impl Walk<'_> {
+    /// The outer loop of `Entity.checkInsideBlocks(list, collector)`: every recorded move, along the
+    /// straight line or, when the move's requested motion is known, one axis at a time in the
+    /// collision's axis order.
+    fn visit_moves(&mut self, moves: &[Movement]) {
+        for m in moves {
+            let mut from = m.from;
+            let delta = sub(m.to, m.from);
+            let mut budget = 16;
+            match m.original {
+                Some(original) if length_sqr(delta) > 0.0 => {
+                    for axis in axis_step_order(original) {
+                        let d = axis_value(delta, axis);
+                        if d != 0.0 {
+                            let next = relative(from, axis, d);
+                            budget -= self.check_segment(from, next, budget);
+                            from = next;
+                        }
+                    }
+                }
+                _ => budget -= self.check_segment(m.from, m.to, 16),
+            }
+            if budget <= 0 {
+                self.check_segment(m.to, m.to, 1);
+            }
+        }
+    }
+
     /// The inner `Entity.checkInsideBlocks(from, to, ..)`: visit the blocks the box overlaps on
     /// its way from `from` to `to`, at most `budget` steps deep. Returns the number of steps it
     /// consumed.
@@ -879,8 +1016,19 @@ impl Walk<'_> {
         last_step + 1
     }
 
-    /// One block of the traversal: skip air, decide whether the player really is inside it, and
-    /// run its `entityInside` once per tick.
+    /// One block of the traversal: skip air, decide whether the player really is inside the block
+    /// (`bl3`) or touching its fluid (`bl4`), and run the block's and the fluid's `entityInside`,
+    /// once per visit, the first time either holds.
+    ///
+    /// For the server's visit a `LiquidBlock` does not count as "inside" by itself, so that touching
+    /// a lava cell without reaching its fluid (a player above the surface, the box overlapping the
+    /// cell's empty top) does not use the cell up: the server's copy that then enters the fluid in
+    /// the same call (its own `travel` after the move packet) is still ignited. The reference reads as if
+    /// the block's default entity-inside shape marked every liquid cell visited on first contact; the
+    /// recording says otherwise (the server's hurt packets in `lava_unresisted` and `lava_lanes` carry
+    /// the velocity of the tick before the one that rule would burn it in: `tests/lava_fire.rs`).
+    /// The client's visit keeps the reference's reading, which its recordings cannot tell apart
+    /// (one move per tick).
     fn visit_block(
         &mut self,
         pos: (i32, i32, i32),
@@ -893,6 +1041,10 @@ impl Walk<'_> {
         let (x, y, z) = pos;
         let state = self.world.block_state(x, y, z);
         if state == ms_data::AIR {
+            return;
+        }
+        // A block that was visited already runs nothing again, whatever the box does to it now.
+        if self.visited.contains(&pos) {
             return;
         }
         let kind = info(state).kind;
@@ -924,29 +1076,16 @@ impl Walk<'_> {
                     collided_along_vector(bounding_box_at(self.p, from), sub(to, from), &moved)
                 }
             }
+            // The server's visit does not count a liquid block as "inside" by itself (see
+            // `visit_block`'s docs); its fluid is judged below.
+            Kind::Liquid if self.server.is_some() => false,
             // Every other block uses Shapes.block(): inside as soon as the traversal reaches it.
             _ => true,
         };
-        if !inside || self.visited.contains(&pos) {
-            return;
-        }
-        self.visited.push(pos);
-        self.collector.advance_step(step);
-        let precise = long_move
-            || bb.intersects(Aabb::from_corners(
-                f64::from(x),
-                f64::from(y),
-                f64::from(z),
-                f64::from(x) + 1.0,
-                f64::from(y) + 1.0,
-                f64::from(z) + 1.0,
-            ));
-        self.entity_inside(kind, state, pos, precise);
-
         // FluidState.entityInside, when the moving box touches the fluid's own box
         // (Entity.collidedWithFluid).
         let fluid = ms_data::fluid(state);
-        if !fluid.is_empty() {
+        let in_fluid = !fluid.is_empty() && {
             let height = f64::from(crate::fluids::fluid_height_at(self.world, x, y, z, fluid));
             let fluid_box = Aabb::from_corners(
                 f64::from(x),
@@ -956,22 +1095,62 @@ impl Walk<'_> {
                 f64::from(y) + height,
                 f64::from(z) + 1.0,
             );
-            if collided_along_vector(bounding_box_at(self.p, from), sub(to, from), &[fluid_box]) {
-                self.collector.advance_step(step);
-                match fluid.kind {
-                    ms_data::FluidKind::Lava => {
-                        self.collector.apply(InsideEffect::ClearFreeze);
-                        self.collector.apply(InsideEffect::LavaIgnite);
-                    }
-                    ms_data::FluidKind::Water => self.collector.apply(InsideEffect::Extinguish),
-                    ms_data::FluidKind::Empty => {}
+            collided_along_vector(bounding_box_at(self.p, from), sub(to, from), &[fluid_box])
+        };
+        if !(inside || in_fluid) {
+            return;
+        }
+        self.visited.push(pos);
+        if inside {
+            self.collector.advance_step(step);
+            let precise = long_move
+                || bb.intersects(Aabb::from_corners(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(z),
+                    f64::from(x) + 1.0,
+                    f64::from(y) + 1.0,
+                    f64::from(z) + 1.0,
+                ));
+            self.entity_inside(kind, state, pos, precise);
+        }
+        if in_fluid {
+            self.collector.advance_step(step);
+            match fluid.kind {
+                ms_data::FluidKind::Lava => {
+                    self.collector.apply(InsideEffect::ClearFreeze);
+                    self.collector.apply(InsideEffect::LavaIgnite);
                 }
+                ms_data::FluidKind::Water => self.collector.apply(InsideEffect::Extinguish),
+                ms_data::FluidKind::Empty => {}
             }
         }
     }
 
     /// `BlockState.entityInside` for the blocks that act on the player.
     fn entity_inside(&mut self, kind: Kind, state: u32, pos: (i32, i32, i32), precise: bool) {
+        if let Some(server) = self.server.as_mut() {
+            // The server's visit looks only for what the server alone does.
+            match kind {
+                Kind::SweetBerryBush => {
+                    // A grown bush (age > 0) hurts a player that moved horizontally by at least
+                    // 0.003F along an axis, as far as the server knows (`isClientAuthoritative`
+                    // players are judged by `getKnownMovement`).
+                    if ms_data::property(state, "age") != Some("0") {
+                        let moved = server.known_movement;
+                        if moved.x * moved.x + moved.z * moved.z > 0.0 {
+                            let threshold = f64::from(0.003_f32);
+                            if moved.x.abs() >= threshold || moved.z.abs() >= threshold {
+                                server.events.push(ServerInsideEvent::BerryHurt);
+                            }
+                        }
+                    }
+                }
+                Kind::PowderSnow => self.collector.apply(InsideEffect::Extinguish),
+                _ => {}
+            }
+            return;
+        }
         match kind {
             Kind::Web => {
                 // WebBlock: (0.25, 0.05F, 0.25), or a quarter of the slowdown with the weaving
@@ -984,21 +1163,12 @@ impl Walk<'_> {
                 make_stuck_in_block(self.p, v);
             }
             Kind::SweetBerryBush => {
+                // The client's half is the slowdown; the damage is the server's alone
+                // (`level instanceof ServerLevel`): see `ServerInsideEvent::BerryHurt`.
                 make_stuck_in_block(
                     self.p,
                     Vec3::new(f64::from(0.8_f32), 0.75, f64::from(0.8_f32)),
                 );
-                // The server's half: a grown bush (age > 0) hurts a player that moved
-                // horizontally by at least 0.003F along an axis this tick.
-                if ms_data::property(state, "age") != Some("0") {
-                    let moved = sub(self.p.pos, self.old_pos);
-                    if moved.x * moved.x + moved.z * moved.z > 0.0 {
-                        let threshold = f64::from(0.003_f32);
-                        if moved.x.abs() >= threshold || moved.z.abs() >= threshold {
-                            damage::hurt(self.p, DamageSource::Generic, 1.0);
-                        }
-                    }
-                }
             }
             Kind::PowderSnow => {
                 // Only when the player's own block is powder snow (feet inside it).
@@ -1788,6 +1958,112 @@ mod tests {
         assert_eq!((p.invulnerable_time, p.hurt_time), (0, 0));
         assert!(is_hot_floor(&w, (0, 0, 0)));
         assert!(!is_hot_floor(&w, (1, 0, 0)));
+    }
+
+    #[test]
+    fn the_clients_visit_ignites_on_lava_and_never_hurts() {
+        let w = world_with(&[((0, 0, 0), "minecraft:lava[level=0]")]);
+        let mut p = player_at(0.5, 0.0, 0.5);
+        apply_effects_from_segment(
+            &mut p,
+            &w,
+            Vec3::new(0.5, 0.0, 0.5),
+            Vec3::new(0.5, 0.0, 0.5),
+        );
+        // `Entity.lavaIgnite` is the client's too; `Entity.lavaHurt` only hurts in a `ServerLevel`.
+        assert_eq!(p.remaining_fire_ticks, 300);
+        assert_eq!(p.health, 20.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (0, 0));
+    }
+
+    #[test]
+    fn the_servers_visit_judges_lava_by_the_fluid_and_does_not_use_a_cell_up_by_touching_it() {
+        // The surface of a source cell is 8/9 high.
+        let w = world_with(&[((0, 0, 0), "minecraft:lava[level=0]")]);
+        let mut p = player_at(0.5, 0.95, 0.5);
+        // The move packet slides sideways with the feet above the surface (the box overlaps the cell
+        // but not its fluid); the server's own `travel` then drops into the fluid.
+        let packet = Movement::new(
+            Vec3::new(0.2, 0.95, 0.5),
+            Vec3::new(0.5, 0.95, 0.5),
+            Some(Vec3::new(0.3, 0.0, 0.0)),
+        );
+        let travel = Movement::new(
+            Vec3::new(0.5, 0.95, 0.5),
+            Vec3::new(0.5, 0.85, 0.5),
+            Some(Vec3::new(0.0, -0.1, 0.0)),
+        );
+        let touch = server_inside_events(&mut p, &w, &[packet], Vec3::ZERO);
+        assert_eq!(touch, Vec::new());
+        let both = server_inside_events(&mut p, &w, &[packet, travel], Vec3::ZERO);
+        assert_eq!(both, vec![ServerInsideEvent::LavaIgnite]);
+        // Nothing of the player changed: the caller applies the events.
+        assert_eq!(p.remaining_fire_ticks, 0);
+        assert_eq!(p.health, 20.0);
+        // No lava, fluid, bush or snow around: nothing to look at.
+        let empty = world_with(&[((5, 0, 5), "minecraft:stone")]);
+        assert_eq!(
+            server_inside_events(&mut p, &empty, &[packet, travel], Vec3::ZERO),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn the_server_puts_the_fire_out_in_water() {
+        let w = world_with(&[((0, 0, 0), "minecraft:water[level=0]")]);
+        let mut p = player_at(0.5, 0.0, 0.5);
+        let stay = Movement::new(Vec3::new(0.5, 0.0, 0.5), Vec3::new(0.5, 0.0, 0.5), None);
+        assert_eq!(
+            server_inside_events(&mut p, &w, &[stay], Vec3::ZERO),
+            vec![ServerInsideEvent::Extinguish]
+        );
+    }
+
+    #[test]
+    fn a_grown_berry_bush_hurts_the_server_when_the_last_packet_moved_the_player() {
+        let grown = world_with(&[((0, 0, 0), "minecraft:sweet_berry_bush[age=3]")]);
+        let young = world_with(&[((0, 0, 0), "minecraft:sweet_berry_bush[age=0]")]);
+        let mut p = player_at(0.5, 0.0, 0.5);
+        let m = Movement::new(Vec3::new(0.5, 0.0, 0.5), Vec3::new(0.5, 0.0, 0.5), None);
+        let moved = |x: f64, z: f64| Vec3::new(x, 0.0, z);
+        // `abs(x) >= 0.003F || abs(z) >= 0.003F` of a movement that is not zero
+        let hurt = vec![ServerInsideEvent::BerryHurt];
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], moved(0.01, 0.0)),
+            hurt
+        );
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], moved(0.0, -0.01)),
+            hurt
+        );
+        // the threshold is the float 0.003F widened, which is a little more than 0.003
+        let threshold = f64::from(0.003_f32);
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], moved(threshold, 0.0)),
+            hurt
+        );
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], moved(0.003, 0.0)),
+            Vec::new()
+        );
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], moved(0.002, 0.002)),
+            Vec::new()
+        );
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], Vec3::ZERO),
+            Vec::new()
+        );
+        // a vertical movement is not one
+        assert_eq!(
+            server_inside_events(&mut p, &grown, &[m], Vec3::new(0.0, 0.5, 0.0)),
+            Vec::new()
+        );
+        // a young bush (age 0) never hurts
+        assert_eq!(
+            server_inside_events(&mut p, &young, &[m], moved(0.1, 0.0)),
+            Vec::new()
+        );
     }
 
     #[test]

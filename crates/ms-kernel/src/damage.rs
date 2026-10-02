@@ -50,7 +50,7 @@
 //! placed (spawn, teleport with a velocity reset): it makes the server's copy agree with the
 //! client's.
 //!
-//! # The server's environment: magma and powder snow
+//! # The server's environment: magma, powder snow, lava, fire and berries
 //!
 //! [`server_do_tick`] also runs the part of `LivingEntity.aiStep`/`Entity.applyEffectsFromBlocks`
 //! that only the server does and that the client sees only as packets:
@@ -62,19 +62,32 @@
 //! * `ticksFrozen` and the freeze modifier are synced by the entity tracker pass ([`sync_motion`])
 //!   at the start of the *next* server tick, so they reach the client two client ticks after the
 //!   movement they follow (a hit's health and damage event are sent at once, one tick). The client
-//!   increments its own `ticksFrozen` meanwhile and has it replaced by the server's value.
+//!   increments its own `ticksFrozen` meanwhile and has it replaced by the server's value;
+//! * the server's own fluid state at the position the client reported (it decides whether the
+//!   server's `travel` is a fluid travel, and flowing water and lava push its velocity), the fire
+//!   counter (300 ticks from every lava contact, 1.0 of `on_fire` damage on every 20th tick outside
+//!   lava, cleared by water and powder snow, set back to -20 when the player is not burning), and
+//!   the blocks the server's own movement passes through ([`crate::blocks::server_inside_events`],
+//!   over the move packets it handled and its own `travel`): `lavaHurt`'s 4.0 and a grown sweet
+//!   berry bush's 1.0 for a player the server knows to have moved (`getKnownMovement`, the last
+//!   packet's displacement). Fire damage is refused outright under fire resistance
+//!   ([`hurt_by_fire`]); the client's own tick ignites the player and is never hurt by any of it.
+//!   Corpus: `lava_flow`, `lava_lanes`, `lava_unresisted`, `lava_pool`, checked in
+//!   `tests/lava_fire.rs`; the corpus has no recording of a berry bush hurting the player.
 //!
 //! The recordings show one more effect the model cannot reproduce: the two threads' phase drifts by
 //! a tick now and then, so a server packet reaches the client one tick late or early, or two are
 //! merged into one (corpus `powder_snow`: six such events in 185 ticks; `bubble_columns`: the burns
 //! come every ten ticks from tick 95 to 155, then at 164 and 174, a tick early, then at 185 and 195,
 //! back on the grid). The model delivers each value at its nominal tick; every one of those events
-//! is pinned, and shown to be a pure shift of a packet, in `tests/freeze_hot_floor.rs`.
+//! is pinned, and shown to be a pure shift of a packet, in `tests/freeze_hot_floor.rs` and
+//! `tests/lava_fire.rs`.
 //!
-//! Not modelled: armour and shields, difficulty scaling of mob damage, fire/drowning/in-wall and
-//! other environmental damage sources (the caller passes whatever it wants through [`hurt`]),
-//! death beyond `health == 0`, the server-only food exhaustion that damage adds, and the server's
-//! own copy of the stuck-speed multiplier of cobwebs, berries and powder snow.
+//! Not modelled: armour and shields, difficulty scaling of mob damage, drowning, in-wall, cactus,
+//! campfire and other environmental damage sources (the caller passes whatever it wants through
+//! [`hurt`] and [`hurt_by_fire`]), rain putting the fire out, death beyond `health == 0`, the
+//! server-only food exhaustion that damage adds, and the server's own copy of the stuck-speed
+//! multiplier of cobwebs, berries and powder snow.
 
 use crate::attributes::Attribute;
 use crate::state::PlayerState;
@@ -386,6 +399,31 @@ pub struct ServerState {
     /// count is a multiple of 40. It starts at zero like the client's counter of a fresh player, so
     /// the two agree there; a recording or a restored snapshot may have them offset.
     pub tick_count: i32,
+
+    // ---- Fire and fluids. The client clears its own fire counter at the start of every tick (its
+    // level is not a `ServerLevel`); the real one, which burns the player for as long as it runs and
+    // hurts it once a second, is the server's.
+    /// The server's `remainingFireTicks`: set to 300 by lava, counted down in its `baseTick`
+    /// (1.0 of fire damage whenever it is a multiple of 20 outside lava), cleared by water, and put
+    /// back to -20 (`Player.getFireImmuneTicks`) by `applyEffectsFromBlocks` when the player is not
+    /// burning and was not ignited in that call.
+    pub fire_ticks: i32,
+    /// The server's own fluid state (`wasTouchingWater`, `isInLava`, the fluid depths) as its last
+    /// `baseTick` found it at the position the client reported. It decides whether the server's
+    /// `travel` is a fluid travel, and `isInLava` suppresses the burning damage while in lava.
+    pub in_water: bool,
+    pub in_lava: bool,
+    pub water_height: f64,
+    pub lava_height: f64,
+    /// The moves the server recorded since its last tick (`Entity.movementThisTick`): the move of
+    /// every move packet handled ([`server_move_packet`]), as `(from, to)` of the displacement the
+    /// packet reported. Its own `travel` adds its move in [`server_do_tick`], which then walks them
+    /// all for the blocks inside.
+    pub moves: [Option<crate::blocks::Movement>; 4],
+    pub move_count: u8,
+    /// `ServerPlayer.getKnownMovement`: the displacement of the last move packet, zero when a client
+    /// tick sent none. Sweet berry bushes judge a player by it.
+    pub known_movement: Vec3,
 }
 
 /// Record that the client's `BubbleColumnBlock.entityInside` pushed the player (`drag_down`: the
@@ -441,6 +479,15 @@ pub fn reset_server_copy(p: &mut PlayerState) {
     p.server.in_powder_snow = false;
     p.server.thawed = false;
     p.server.bubble_count = 0;
+    // The fire counter the client holds is all there is to go on.
+    p.server.fire_ticks = p.remaining_fire_ticks;
+    p.server.in_water = p.in_water;
+    p.server.in_lava = p.in_lava;
+    p.server.water_height = p.water_height;
+    p.server.lava_height = p.lava_height;
+    p.server.move_count = 0;
+    p.server.moves = Default::default();
+    p.server.known_movement = Vec3::ZERO;
 }
 
 /// `getMaxAbsorption()`: the absorption effect adds `4 * (amplifier + 1)` to a base of 0.
@@ -604,6 +651,16 @@ pub fn knockback(p: &mut PlayerState, strength: f64, dx: f64, dz: f64) {
 pub fn hurt(p: &mut PlayerState, source: DamageSource, amount: f32) -> bool {
     let mut rng = fallback_rng(p);
     hurt_with_rng(p, source, amount, &mut rng)
+}
+
+/// `LivingEntity.hurtServer` with a damage source of the `is_fire` tag (`on_fire`, `lava`,
+/// `hot_floor`, ...) and no position: refused outright under fire resistance, otherwise as
+/// [`hurt`] with no knockback.
+pub fn hurt_by_fire(p: &mut PlayerState, amount: f32) -> bool {
+    if p.effects.has(crate::effects::FIRE_RESISTANCE) {
+        return false;
+    }
+    hurt(p, DamageSource::Generic, amount)
 }
 
 /// [`hurt`] with an explicit random source for the knockback tie-break.
@@ -844,12 +901,33 @@ fn handle_move_packet(p: &mut PlayerState, start: &TickStart, world: &World) {
         }
         // Entity.move(PLAYER, delta) followed by setOnGroundWithMovement(packet.onGround)
         p.server.on_ground = p.on_ground;
+        // The move is recorded (`addMovementThisTick`, with the displacement as the requested
+        // motion), and the displacement is the server's `knownMovement`. A packet without a
+        // position (rotation or status only) moves the server's copy by nothing.
+        let to = if sends_position { p.pos } else { start.pos };
+        let delta = Vec3::new(to.x - start.pos.x, to.y - start.pos.y, to.z - start.pos.z);
+        record_server_move(p, crate::blocks::Movement::new(start.pos, to, Some(delta)));
+        p.server.known_movement = delta;
+    } else {
+        // `handleClientTickEnd`: no move packet this client tick.
+        p.server.known_movement = Vec3::ZERO;
     }
     // A landing always travels in a move packet (the ground flag flips or the player moves);
     // `doCheckFallDamage` then runs on the server's own fall distance, which the recorded landing
     // stands for.
     if let Some((fall, multiplier)) = p.server.pending_fall.take() {
         apply_fall_damage(p, fall, multiplier);
+    }
+}
+
+/// `Entity.addMovementThisTick` for the server's copy (moves beyond the four it keeps are dropped:
+/// a server tick handles one move packet, two when the threads' phase slips, and makes one move of
+/// its own, two in a fluid).
+fn record_server_move(p: &mut PlayerState, m: crate::blocks::Movement) {
+    let s = &mut p.server;
+    if usize::from(s.move_count) < s.moves.len() {
+        s.moves[usize::from(s.move_count)] = Some(m);
+        s.move_count += 1;
     }
 }
 
@@ -867,7 +945,10 @@ fn server_move_self(p: &mut PlayerState, world: &World, pos: Vec3) -> Vec3 {
     let moved_len_sq = moved.x * moved.x + moved.y * moved.y + moved.z * moved.z;
     let motion_len_sq = motion.x * motion.x + motion.y * motion.y + motion.z * motion.z;
     let new_pos = if moved_len_sq > 1.0E-7 || motion_len_sq - moved_len_sq < 1.0E-7 {
-        Vec3::new(pos.x + moved.x, pos.y + moved.y, pos.z + moved.z)
+        let to = Vec3::new(pos.x + moved.x, pos.y + moved.y, pos.z + moved.z);
+        // `addMovementThisTick`: the inside-block visit walks this move too.
+        record_server_move(p, crate::blocks::Movement::new(pos, to, Some(motion)));
+        to
     } else {
         pos
     };
@@ -917,6 +998,53 @@ fn effective_gravity(p: &PlayerState) -> f64 {
     }
 }
 
+/// The part of `Entity.baseTick` that matters for the server's copy of the player, run at the start
+/// of `ServerPlayer.doTick` from the position the client last reported:
+///
+/// * `updateInWaterStateAndDoFluidPushing`: the server's own fluid state (what decides its `travel`
+///   and whether it is "in lava") and the push of flowing water and lava on its velocity, with the
+///   fluid module's rules lent the server's velocity;
+/// * the fire counter: while it is positive and not a `fireImmune` entity, every 20th tick outside
+///   lava hurts with 1.0 of `on_fire` damage (refused under fire resistance), then it counts down.
+fn server_base_tick(p: &mut PlayerState, world: &World) {
+    if world.may_contain(ms_data::class::FLUID) {
+        let client = (
+            p.vel,
+            p.in_water,
+            p.in_lava,
+            p.water_height,
+            p.lava_height,
+            p.fall_distance,
+        );
+        p.vel = p.server_vel;
+        crate::fluids::update_in_fluid_state_and_push(p, world);
+        p.server_vel = p.vel;
+        p.server.in_water = p.in_water;
+        p.server.in_lava = p.in_lava;
+        p.server.water_height = p.water_height;
+        p.server.lava_height = p.lava_height;
+        (
+            p.vel,
+            p.in_water,
+            p.in_lava,
+            p.water_height,
+            p.lava_height,
+            p.fall_distance,
+        ) = client;
+    } else {
+        p.server.in_water = false;
+        p.server.in_lava = false;
+        p.server.water_height = 0.0;
+        p.server.lava_height = 0.0;
+    }
+    if p.server.fire_ticks > 0 {
+        if p.server.fire_ticks % 20 == 0 && !p.server.in_lava {
+            hurt_by_fire(p, 1.0);
+        }
+        p.server.fire_ticks -= 1;
+    }
+}
+
 /// `ServerPlayer.doTick` as it acts on the server's copy of the velocity: `LivingEntity.aiStep`
 /// (velocity thresholds, then `travel` with a zero input vector). Returns the position the server's
 /// copy ended the move at.
@@ -934,16 +1062,26 @@ fn server_ai_step(p: &mut PlayerState, world: &World) -> Vec3 {
     p.server_vel = Vec3::new(x, y, z);
 
     let pos = p.pos;
-    if crate::fluids::should_travel_in_fluid(p, world) {
-        // Lend the fluid port a copy of the player carrying the server's velocity and ground flag.
+    // `LivingEntity.shouldTravelInFluid`, on the fluid state the server's own `baseTick` found.
+    if (p.server.in_water || p.server.in_lava) && crate::fluids::is_affected_by_fluids(p) {
+        // Lend the fluid port a copy of the player carrying the server's velocity, ground flag and
+        // fluid state.
         let mut scratch = p.clone();
         scratch.vel = p.server_vel;
         scratch.on_ground = p.server.on_ground;
+        scratch.in_water = p.server.in_water;
+        scratch.in_lava = p.server.in_lava;
+        scratch.water_height = p.server.water_height;
+        scratch.lava_height = p.server.lava_height;
+        scratch.movements.clear();
         crate::fluids::travel_in_fluid(&mut scratch, world, Vec3::ZERO, &mut |s, d| {
             crate::entity::move_entity(s, world, d);
         });
         p.server_vel = scratch.vel;
         p.server.on_ground = scratch.on_ground;
+        for m in scratch.movements.entries() {
+            record_server_move(p, *m);
+        }
         return scratch.pos;
     }
 
@@ -999,9 +1137,11 @@ fn server_ai_step(p: &mut PlayerState, world: &World) -> Vec3 {
 ///
 /// Modelled: travel in air and on ground (block friction, gravity attribute, levitation, slow
 /// falling, block speed factor, collision zeroing, `updateEntityMovementAfterFallOn` through
-/// `blocks::after_fall_on`); fluids through `fluids::travel_in_fluid` on a copy. Not modelled:
-/// climbing, cobweb-style stuck multipliers, sneaking's edge back-off, fluid pushing, entity
-/// pushes, and server-side damage sources other than the ones passed to [`hurt`].
+/// `blocks::after_fall_on`); fluids through `fluids::travel_in_fluid` on a copy, with the server's
+/// own fluid state and the push of flowing fluids; lava, fire and berries (see the module docs).
+/// Not modelled: climbing, cobweb-style stuck multipliers, sneaking's edge back-off, entity pushes,
+/// and server-side damage sources other than the ones the module docs list and the ones passed to
+/// [`hurt`].
 pub fn server_tick(p: &mut PlayerState, start: &TickStart, world: &World) {
     server_move_packet(p, start, world);
     sync_motion(p);
@@ -1022,6 +1162,7 @@ pub fn server_move_packet(p: &mut PlayerState, start: &TickStart, world: &World)
 pub fn server_do_tick(p: &mut PlayerState, world: &World) {
     // ServerLevel.tickNonPassenger: `tickCount++` before the entity's tick.
     p.server.tick_count = p.server.tick_count.wrapping_add(1);
+    server_base_tick(p, world);
     let end = server_ai_step(p, world);
     server_apply_effects_from_blocks(p, world, end);
     server_freeze(p, world, end);
@@ -1039,13 +1180,15 @@ fn server_on_pos_legacy(p: &mut PlayerState, world: &World, end: Vec3) -> (i32, 
 }
 
 /// The server's `Entity.applyEffectsFromBlocks` after its own `travel`, as far as it acts on what
-/// the client sees: when the server's copy is on the ground (its own flag, which its collision
-/// result in this very tick may just have set, ahead of the client's), `Block.stepOn` runs for the
-/// block under it (`getOnPosLegacy` at the server's position `end`). Magma hurts a player that is
-/// not sneaking (`isSteppingCarefully` is the server's shift flag, which the client's input packet
-/// of this tick has already set) with the `hot_floor` damage of 1.0, which fire resistance cancels
-/// before the invulnerability window is looked at. The client never does this: its `hurt` is
-/// `hurtClient`, which does nothing.
+/// the client sees.
+///
+/// When the server's copy is on the ground (its own flag, which its collision result in this very
+/// tick may just have set, ahead of the client's), `Block.stepOn` runs for the block under it
+/// (`getOnPosLegacy` at the server's position `end`). Magma hurts a player that is not sneaking
+/// (`isSteppingCarefully` is the server's shift flag, which the client's input packet of this tick
+/// has already set) with the `hot_floor` damage of 1.0, which fire resistance cancels before the
+/// invulnerability window is looked at. The client never does this: its `hurt` is `hurtClient`,
+/// which does nothing.
 ///
 /// The damage therefore lands in the server tick in which the server's own copy lands, the one
 /// that handles the move packet of the client's last airborne tick, and reaches the client at the
@@ -1053,16 +1196,22 @@ fn server_on_pos_legacy(p: &mut PlayerState, world: &World, end: Vec3) -> (i32, 
 /// recording `bubble_columns`: first burn visible at the start of the tick the client lands in).
 /// After that it repeats every ten ticks, each time the invulnerability window (20 ticks, damage
 /// accepted again at 10 or less) allows.
+///
+/// Then the blocks the server's own movement passed through ([`crate::blocks::server_inside_events`]
+/// over the move packets handled since its last tick and its `travel`, so a server that is ahead of
+/// the client, as it is when it falls into lava first, burns a tick before the client does):
+/// lava sets it on fire for 15 seconds and hurts it with 4.0 of fire damage, a grown sweet berry
+/// bush hurts it with 1.0 when the last move packet moved it horizontally, water and powder snow
+/// put the fire out. As the game does, a player that is not burning and was not just ignited gets
+/// its fire counter set back to -20.
 fn server_apply_effects_from_blocks(p: &mut PlayerState, world: &World, end: Vec3) {
     if p.server.on_ground {
         let on = server_on_pos_legacy(p, world, end);
-        if crate::blocks::is_hot_floor(world, on)
-            && !p.shift_key_down
-            && !p.effects.has(crate::effects::FIRE_RESISTANCE)
-        {
-            hurt(p, DamageSource::Generic, 1.0);
+        if crate::blocks::is_hot_floor(world, on) && !p.shift_key_down {
+            hurt_by_fire(p, 1.0);
         }
     }
+    server_inside_blocks(p, world);
     // The bubble columns the movement went through push the server's velocity too (the fluid
     // module's rules, lent the server's velocity and the client's fall distance untouched).
     let n = usize::from(p.server.bubble_count);
@@ -1083,6 +1232,59 @@ fn server_apply_effects_from_blocks(p: &mut PlayerState, world: &World, end: Vec
         p.server.bubble_count = 0;
     }
 }
+
+/// The server's `checkInsideBlocks` over the moves it recorded since its last tick (the move
+/// packets, then its own `travel`; a degenerate move at the current position when there were none),
+/// and the application of what it raised ([`crate::blocks::ServerInsideEvent`]) to the server's
+/// copy: its fire counter and the damage.
+fn server_inside_blocks(p: &mut PlayerState, world: &World) {
+    use crate::blocks::{Movement, ServerInsideEvent};
+    let n = usize::from(p.server.move_count);
+    p.server.move_count = 0;
+    let mut moves = [Movement::new(Vec3::ZERO, Vec3::ZERO, None); 4];
+    let mut len = 0;
+    for m in p.server.moves[..n].iter().flatten() {
+        moves[len] = *m;
+        len += 1;
+    }
+    if len == 0 {
+        // `new Movement(oldPosition(), position())`: the server's copy did not move.
+        moves[0] = Movement::new(p.pos, p.pos, None);
+        len = 1;
+    }
+    let known = p.server.known_movement;
+    let events = crate::blocks::server_inside_events(p, world, &moves[..len], known);
+    let fire_before = p.server.fire_ticks;
+    for event in events {
+        if !p.is_alive() {
+            break;
+        }
+        match event {
+            ServerInsideEvent::BerryHurt => {
+                hurt(p, DamageSource::Generic, 1.0);
+            }
+            ServerInsideEvent::LavaIgnite => {
+                // `lavaIgnite`: `igniteForSeconds(15.0F)` (floor(15 * 20) ticks) and `clearFreeze`
+                // (if the client's own visit did not thaw the player already); then `lavaHurt`.
+                p.server.fire_ticks = p.server.fire_ticks.max(300);
+                if !p.server.thawed {
+                    note_thaw(p);
+                }
+                hurt_by_fire(p, 4.0);
+            }
+            ServerInsideEvent::Extinguish => {
+                p.server.fire_ticks = p.server.fire_ticks.min(0);
+            }
+        }
+    }
+    // `if (!isOnFire() && !ignitedJustNow) setRemainingFireTicks(-getFireImmuneTicks())`
+    if p.server.fire_ticks <= 0 && p.server.fire_ticks <= fire_before {
+        p.server.fire_ticks = -PLAYER_FIRE_IMMUNE_TICKS;
+    }
+}
+
+/// `Player.getFireImmuneTicks`.
+const PLAYER_FIRE_IMMUNE_TICKS: i32 = 20;
 
 /// `Entity.FREEZE_HURT_FREQUENCY`: the freeze damage comes every 40 ticks of the entity's own
 /// `tickCount` ([`ServerState::tick_count`]).
@@ -1677,6 +1879,107 @@ mod tests {
         server_do_tick(&mut q, &world);
         // (139 + no steps - 2 = 137 < 140)
         assert_eq!(q.health, 20.0);
+    }
+
+    // ---- lava, fire and berries
+
+    /// A player standing in a lava cell of a pool one block deep (the floor top at y = -64).
+    fn in_lava() -> (PlayerState, World) {
+        let world = world_with(&[((0, -64, 0), "minecraft:lava[level=0]")]);
+        let mut p = player();
+        p.pos = Vec3::new(0.5, -64.0, 0.5);
+        p.on_ground = true;
+        reset_server_copy(&mut p);
+        (p, world)
+    }
+
+    #[test]
+    fn lava_hurts_from_the_server_copy_and_the_client_only_catches_fire() {
+        let (mut p, world) = in_lava();
+        crate::player::tick(&mut p, &crate::state::Input::default(), &world);
+        // the client ignites (its counter is cleared again at the start of its next tick) but
+        // `lavaHurt` only hurts a `ServerLevel`
+        assert_eq!(p.remaining_fire_ticks, 300);
+        assert_eq!(p.health, 20.0);
+        let (mut p, world) = in_lava();
+        step(&mut p, &world);
+        assert_eq!(p.health, 16.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (20, 10));
+        assert_eq!(p.server.fire_ticks, 300);
+        // the lava hits again when the window allows (every ten ticks); outside the window the 4.0
+        // is no more than the 4.0 that hurt last
+        let mut hits = Vec::new();
+        for t in 1..32 {
+            let before = p.health;
+            step(&mut p, &world);
+            if p.health < before {
+                hits.push(t);
+            }
+        }
+        assert_eq!(hits, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn fire_resistance_refuses_lava_and_burning_damage_but_not_the_fire() {
+        let (mut p, world) = in_lava();
+        crate::effects::add_effect(&mut p, crate::effects::FIRE_RESISTANCE, 0, 1000);
+        for _ in 0..30 {
+            step(&mut p, &world);
+        }
+        assert_eq!(p.health, 20.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (0, 0));
+        assert_eq!(p.server.fire_ticks, 300);
+        assert!(!hurt_by_fire(&mut p, 1.0));
+        assert_eq!(p.health, 20.0);
+    }
+
+    #[test]
+    fn a_burning_player_out_of_lava_takes_one_damage_every_twenty_ticks() {
+        let (mut p, world) = in_lava();
+        // out of the pool: on the floor beside it, burning for another 100 ticks
+        p.pos = Vec3::new(2.5, -63.0, 0.5);
+        p.server.fire_ticks = 100;
+        let mut hits = Vec::new();
+        for t in 0..110 {
+            let before = p.health;
+            step(&mut p, &world);
+            if p.health < before {
+                hits.push((t, before - p.health));
+            }
+        }
+        // 100 % 20 == 0 at once, then at 80, 60, 40, 20; the counter then runs out and is put to
+        // -20 by `applyEffectsFromBlocks`
+        assert_eq!(
+            hits,
+            vec![(0, 1.0), (20, 1.0), (40, 1.0), (60, 1.0), (80, 1.0)]
+        );
+        assert_eq!(p.server.fire_ticks, -20);
+    }
+
+    #[test]
+    fn berries_hurt_the_server_copy_of_a_moving_player() {
+        let world = world_with(&[((0, -63, 0), "minecraft:sweet_berry_bush[age=3]")]);
+        let mut p = standing();
+        p.pos = Vec3::new(0.5, -63.0, 0.5);
+        reset_server_copy(&mut p);
+        // standing in the bush: the client sends no movement, the server knows of none
+        for _ in 0..5 {
+            step(&mut p, &world);
+        }
+        assert_eq!(p.health, 20.0);
+        // walking in it: hurt, with the stuck-speed slowdown on the client
+        let walk = crate::state::Input {
+            forward: true,
+            ..crate::state::Input::default()
+        };
+        let start = TickStart::of(&p);
+        crate::player::tick(&mut p, &walk, &world);
+        assert_eq!(p.health, 20.0, "the client does not hurt itself");
+        server_move_packet(&mut p, &start, &world);
+        sync_motion(&mut p);
+        server_do_tick(&mut p, &world);
+        assert_eq!(p.health, 19.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (20, 10));
     }
 
     #[test]

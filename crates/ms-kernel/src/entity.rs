@@ -290,17 +290,14 @@ pub fn maybe_back_off_from_edge(p: &PlayerState, world: &World, motion: Vec3) ->
 // Fall damage
 // ---------------------------------------------------------------------------------------------
 
-/// The water half of `Entity.updateInWaterStateAndDoFluidPushing`, which `LivingEntity` re-runs
-/// inside `checkFallDamage` when the entity is not in water yet (so landing in water within a move
-/// resets the fall distance). The fluid module's single entry point refreshes both fluids, whereas
-/// the game refreshes only the water here, so the lava state the `baseTick` update produced is kept.
-/// (Lava *pushing* from flowing lava would still be applied twice: the fluid module needs a
-/// water-only entry for that to be exact.)
+/// The water half of `Entity.updateInWaterStateAndDoFluidPushing`
+/// (`updateInWaterStateAndDoWaterCurrentPushing`), which `LivingEntity` re-runs inside
+/// `checkFallDamage` when the entity is not in water yet (so landing in water within a move resets
+/// the fall distance). Only the water is refreshed and pushed: the lava state and the push of
+/// flowing lava belong to the `baseTick` update alone (running them here as well pushed a player
+/// that walked into a lava flow twice in the tick that entered it, corpus `lava_flow`).
 fn update_in_water_state_during_move(p: &mut PlayerState, world: &World) {
-    let (in_lava, lava_height) = (p.in_lava, p.lava_height);
-    crate::fluids::update_in_fluid_state_and_push(p, world);
-    p.in_lava = in_lava;
-    p.lava_height = lava_height;
+    crate::fluids::update_in_water_state_and_push(p, world);
 }
 
 /// `LivingEntity.checkFallDamage` + `Entity.checkFallDamage`: accumulate the fall distance, and on
