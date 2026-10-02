@@ -336,9 +336,9 @@
     },
     "powder_snow_freeze": {
       "checkpoints": "45bb71e8 65aee81f 6ff9f5a5 a4387608 b6b556f3 f0dd8234 6f307674 6db24df9 7d7d9c8d 0636f087 0daa4042 ba02c649 c5113ff9 5dd757e6 e1e5d305 1deaeb8b b15a909c cb2c37a8 488e31d3 9203056f 434c7585 d9a31b34 ff55f941",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xff55f941c27b6a02",
-      "sim": "0x867b10e0a8eb8342",
+      "sim": "0xff55f941c27b6a02",
       "ticks": 365
     },
     "proj_arrow_steep": {
@@ -420,9 +420,9 @@
     },
     "random_course_e": {
       "checkpoints": "1af8d505 c75a34e8 961d302d 6d09c325 ce8cc6a3 2c83fd2e e119e462 2e6f778c 54e9c366 6c712ec5 06bbc2f3 ed9acfe1 b4b48197 329ddd43 0804fd17 207a6905 743de544 90c091ad 9e218c39 341456ea 0a0d2ed3 9f8f166e c5339337 445a7451 df18edc6 c50f5e11 81e0b23a cd30070f b1b14752 2efe0f10 8ee1baa5 c97e436f 2246eb68 fd1b6bf4 92fc0c9b 4398a804 c0e54666 4cba0938 c3b13421 2f3ab16f 0dd01812 66149349 c5bfac56 a39aebc0 c1d5bc32 4189d128 1f83770f 70624865 11d0d164 af0f0870 57d38735 a28c0692 5d948d3a 7bc1f0c2 5caf1055",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x5caf1055b7078e00",
-      "sim": "0x3a60f684936d3743",
+      "sim": "0x5caf1055b7078e00",
       "ticks": 877
     },
     "scaffolding_column": {
