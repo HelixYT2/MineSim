@@ -2,15 +2,16 @@
 //! simulation agrees with the recording.
 //!
 //! The recipe is the one in `docs/corpus.md`: initialise from row 0, then for each row apply the
-//! recorded `pre` diff (what the server changed in between), run one tick with the row's input,
-//! and compare the result with the row's `post`. [`replay`] never re-seeds from the recording
-//! beyond those `pre` diffs, so a divergence compounds exactly as it would in a real run.
-//! [`replay_with`] with [`Mode::Resync`] additionally overwrites the state with the recorded
+//! recorded `pre` diff (what the server changed in between, through [`apply_pre`] so effects and
+//! attribute modifiers are brought in the way the client receives them), run one tick with the
+//! row's input, and compare the result with the row's `post`. [`replay`] never re-seeds from the
+//! recording beyond those `pre` diffs, so a divergence compounds exactly as it would in a real
+//! run. [`replay_with`] with [`Mode::Resync`] additionally overwrites the state with the recorded
 //! `post` after every tick that diverged, which measures each tick on its own instead of only the
 //! prefix before the first error.
 
 use crate::canonical::fields_hash;
-use crate::{apply_state, compare_state, describe, FieldDiff, Fields, Scenario};
+use crate::{apply_pre, compare_state, describe, FieldDiff, Fields, Scenario};
 use ms_kernel::attributes::Attribute;
 use ms_kernel::{Input, PlayerState};
 use ms_oracle::player::{field_rank, player_hash, RollingHash};
@@ -24,8 +25,9 @@ pub enum Mode {
     #[default]
     FreeRun,
     /// After a tick that diverged, overwrite the state with the recorded `post` (via
-    /// [`apply_state`]; attribute modifiers and the server-side velocity copy are the kernel's own
-    /// and are kept), so every tick is judged from a correct start.
+    /// [`apply_pre`], so effects and attributes go through the kernel's client-side handling; the
+    /// server-side shadow state is the kernel's own and is kept), so every tick is judged from a
+    /// correct start.
     Resync,
 }
 
@@ -266,7 +268,8 @@ where
     };
     let (mut streak, mut streak_start) = (0usize, 0usize);
     for (t, row) in scenario.rows.iter().enumerate() {
-        apply_state(&mut p, &row.pre);
+        let prev_post = (t > 0).then(|| &scenario.rows[t - 1].post);
+        apply_pre(&mut p, &row.pre, prev_post);
         tick(&mut p, &row.input, &world);
         report.sim_hashes.push(player_hash(&p));
         let diffs = diff_state(&p, &row.post);
@@ -286,7 +289,7 @@ where
                 report.first_divergence = Divergence::from_diffs(t, &diffs);
             }
             if mode == Mode::Resync {
-                apply_state(&mut p, &row.post);
+                apply_pre(&mut p, &row.post, None);
                 if !row.post.contains_key("support") {
                     p.supporting_block = None;
                 }
@@ -305,7 +308,7 @@ pub fn decode(field: &str, v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canonical::apply_attrs;
+    use crate::canonical::state_from_fields;
     use crate::client_scenarios;
 
     /// A "kernel" that is the recording itself: after the tick the state is the recorded `post`.
@@ -314,12 +317,7 @@ mod tests {
     ) -> impl FnMut(&mut PlayerState, &Input, &World) + 'a {
         let mut row = 0usize;
         move |p, _input, _world| {
-            let post = &scenario.rows[row].post;
-            apply_state(p, post);
-            apply_attrs(p, post);
-            if !post.contains_key("support") {
-                p.supporting_block = None;
-            }
+            *p = state_from_fields(&scenario.rows[row].post);
             row += 1;
         }
     }
@@ -379,9 +377,7 @@ mod tests {
         let s = Scenario::load("walk_basic").unwrap();
         let mut row = 0usize;
         let r = replay(&s, |p, _input, _world| {
-            let post = &s.rows[row].post;
-            apply_state(p, post);
-            apply_attrs(p, post);
+            *p = state_from_fields(&s.rows[row].post);
             if row == 3 {
                 p.pos.x += 1.0e-9;
             }
@@ -403,12 +399,12 @@ mod tests {
     #[test]
     fn resync_measures_ticks_independently_of_earlier_errors() {
         let s = Scenario::load("walk_basic").unwrap();
-        // (It does copy the recorded attributes, which no replay mode restores by itself.)
+        // (It does copy the recorded attributes, so only the motion is missing.)
         let lazy = || {
             let mut row = 0usize;
             let s = s.clone();
             move |p: &mut PlayerState, _: &Input, _: &World| {
-                apply_attrs(p, &s.rows[row].post);
+                p.attributes = state_from_fields(&s.rows[row].post).attributes;
                 p.tick_count += 1;
                 row += 1;
             }

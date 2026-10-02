@@ -8,8 +8,9 @@
 //! What is hashed is exactly the state the real client reports for the local player each tick:
 //! everything the next tick's physics reads plus the derived bounding-box size. What is not:
 //! [`PlayerState::server_vel`] (the server's shadow copy of the velocity, which the client never
-//! observes; its effect shows up in `vel` when knockback is delivered) and the attribute modifier
-//! lists (the oracle records attribute *values*, which is all that influences anything).
+//! observes; its effect shows up in `vel` when knockback is delivered), the other server-side and
+//! lookahead fields (`server`, `water_on_eyes`), and the attribute modifier lists (the oracle
+//! records attribute *values*, which is all that influences anything).
 //!
 //! `serialize_player` destructures [`PlayerState`] without a rest pattern on purpose: adding a
 //! field to the state fails the build here until the field is either added to the layout (a new
@@ -217,8 +218,14 @@ pub fn serialize_player(p: &PlayerState, b: &mut StateBuf) {
         sprint_trigger_time,
         flying,
         crouching,
-        // The server's shadow copy: not client-observable, deliberately not part of the hash.
+        // Server-side and internal state the recording cannot show: the server's shadow copy of
+        // the velocity and the rest of the server-side player (`server_vel`, `server`), and the
+        // eye-fluid lookahead (`water_on_eyes`, which the next tick copies into the recorded
+        // `eye_in_water`). Deliberately not part of the hash: their effect reaches the hashed
+        // fields, where it is compared.
         server_vel: _,
+        server: _,
+        water_on_eyes: _,
     } = p;
 
     b.push_u8(CONTRACT_VERSION);
@@ -462,6 +469,8 @@ mod tests {
         p.flying = false;
         p.crouching = true;
         p.server_vel = Vec3::new(9.0, 9.0, 9.0);
+        p.water_on_eyes = true;
+        p.server.on_ground = true;
         p
     }
 
@@ -649,9 +658,14 @@ mod tests {
             }
             assert!(edits.iter().any(|(n, _)| n == name), "no edit for {name}");
         }
+        // Server-side and lookahead state is not part of the hash.
         let mut p = reference.clone();
         p.server_vel = Vec3::new(1.0, 2.0, 3.0);
-        assert_eq!(player_bytes(&p), want, "server_vel is not part of the hash");
+        p.water_on_eyes = true;
+        p.server.on_ground = true;
+        p.server.pending_fall = Some((3.5, 1.0));
+        p.server.hurt_marked = true;
+        assert_eq!(player_bytes(&p), want, "server-side state is not hashed");
         // The box size is derived: a scale change moves it even with the pose fixed.
         let mut p = reference.clone();
         p.attributes.set_base(Attribute::Scale, 2.0);

@@ -35,11 +35,29 @@ pub fn default_state(block: usize) -> u32 {
     generated::DEFAULT_STATE[block]
 }
 
-/// The block that owns `state`. State ids are contiguous per block, so this is a binary search
-/// over the per-block first-state ids.
+/// The block that owns `state` (a table lookup; the physics asks this for every block it touches).
+#[inline]
 pub fn block_of_state(state: u32) -> usize {
-    assert!(state < BLOCK_STATE_COUNT, "state id {state} out of range");
-    generated::FIRST_STATE.partition_point(|&first| first <= state) - 1
+    state_blocks()[state as usize] as usize
+}
+
+/// Per state, its block index. State ids are contiguous per block, so this is built once from the
+/// per-block first-state ids.
+fn state_blocks() -> &'static [u16] {
+    static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = vec![0u16; BLOCK_STATE_COUNT as usize];
+        for (block, &first) in generated::FIRST_STATE.iter().enumerate() {
+            let end = generated::FIRST_STATE
+                .get(block + 1)
+                .copied()
+                .unwrap_or(BLOCK_STATE_COUNT);
+            for s in first..end {
+                t[s as usize] = block as u16;
+            }
+        }
+        t
+    })
 }
 
 static STATE_SHAPE: &[u8] = include_bytes!("../data/state_shape.bin");
@@ -273,6 +291,14 @@ mod tests {
         assert_eq!(block_of_state(0), 0);
         assert_eq!(block_name(0), "minecraft:air");
         assert_eq!(default_state(0), 0);
+    }
+
+    #[test]
+    fn block_of_state_matches_a_search() {
+        for state in 0..BLOCK_STATE_COUNT {
+            let searched = generated::FIRST_STATE.partition_point(|&first| first <= state) - 1;
+            assert_eq!(block_of_state(state), searched);
+        }
     }
 
     #[test]

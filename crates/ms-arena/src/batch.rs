@@ -48,6 +48,10 @@ impl BatchArena {
         &self.arenas[i]
     }
 
+    pub fn arena_mut(&mut self, i: usize) -> &mut Arena {
+        &mut self.arenas[i]
+    }
+
     /// Advance every arena by one tick from its matching action, across the rayon thread pool.
     pub fn step(&mut self, actions: &[Action]) {
         assert_eq!(
@@ -85,22 +89,16 @@ impl BatchArena {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ms_kernel::player::Keys;
     use ms_numerics::Vec3;
     use ms_world::World;
 
     fn sprint_forward(yaw: f32) -> Action {
         Action {
-            keys: Keys {
-                forward: true,
-                back: false,
-                left: false,
-                right: false,
-            },
+            forward: true,
             jump: true,
-            sprinting: true,
-            sneaking: false,
+            sprint: true,
             yaw,
+            ..Action::default()
         }
     }
 

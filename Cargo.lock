@@ -249,6 +249,7 @@ dependencies = [
 name = "ms-arena"
 version = "0.0.0"
 dependencies = [
+ "ms-data",
  "ms-kernel",
  "ms-numerics",
  "ms-oracle",
@@ -301,6 +302,7 @@ name = "ms-py"
 version = "0.0.0"
 dependencies = [
  "ms-arena",
+ "ms-data",
  "ms-kernel",
  "ms-numerics",
  "ms-world",

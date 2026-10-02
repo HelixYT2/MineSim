@@ -610,8 +610,8 @@ mod tests {
 
     // ---- the whole lock lifecycle, on real scenarios, with stand-in kernels
 
-    use crate::canonical::apply_attrs;
-    use crate::{apply_state, replay};
+    use crate::canonical::state_from_fields;
+    use crate::replay;
 
     fn names() -> Vec<String> {
         vec!["walk_basic".to_string(), "fall_damage_4".to_string()]
@@ -622,12 +622,7 @@ mod tests {
         move |s: &Scenario| {
             let mut row = 0usize;
             replay(s, |p, _input, _world| {
-                let post = &s.rows[row].post;
-                apply_state(p, post);
-                apply_attrs(p, post);
-                if !post.contains_key("support") {
-                    p.supporting_block = None;
-                }
+                *p = state_from_fields(&s.rows[row].post);
                 if let Some((name, tick, dx)) = bad {
                     if s.name == name && row == tick {
                         p.pos.x += dx;

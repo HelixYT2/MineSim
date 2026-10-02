@@ -50,7 +50,7 @@ fn main() -> ExitCode {
         Some("replay-walk") => {
             let a: Vec<String> = std::env::args().skip(2).collect();
             if a.len() != 2 {
-                eprintln!("usage: cargo xtask replay-walk <region-dir> <trace-csv>");
+                eprintln!("usage: cargo xtask replay-walk <region-dir|flat:Y> <trace-csv>");
                 return ExitCode::from(2);
             }
             match replay_walk(&a[0], &a[1]) {
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
         Some("freerun") => {
             let a: Vec<String> = std::env::args().skip(2).collect();
             if a.len() != 2 {
-                eprintln!("usage: cargo xtask freerun <region-dir> <trace-csv>");
+                eprintln!("usage: cargo xtask freerun <region-dir|flat:Y> <trace-csv>");
                 return ExitCode::from(2);
             }
             match freerun(&a[0], &a[1]) {
@@ -427,26 +427,21 @@ fn write_shapes(blocks: &[BlockDef], friction: &[u32], shapes: &[Shape]) -> std:
     fs::write(GENERATED_SHAPES_RS, out)
 }
 
-/// Free-runs a recorded walk through the `Arena` (no per-tick re-seed), reporting the longest
-/// unbroken bit-exact streak. Resyncs to the trace after each divergence to measure subsequent
-/// streaks (so unmodeled regimes — flight/swim/entities — don't poison the whole run).
-fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use ms_arena::{Action, Arena, Player};
-    use ms_kernel::player::Keys;
+/// One row of a legacy walk trace (`ms-kernel/testdata/walk.csv` layout): the state at the end of a
+/// client tick and the keys held during it.
+struct TraceRow {
+    pos: ms_numerics::Vec3,
+    vel: ms_numerics::Vec3,
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+    sprinting: bool,
+    sneaking: bool,
+    input: ms_kernel::Input,
+}
+
+fn read_trace(csv_path: &str) -> Result<Vec<TraceRow>, Box<dyn std::error::Error>> {
     use ms_numerics::Vec3;
-    use ms_world::World;
-
-    struct Row {
-        pos: Vec3,
-        vel: Vec3,
-        yaw: f32,
-        on_ground: bool,
-        sprinting: bool,
-        sneaking: bool,
-        keys: Keys,
-        jump: bool,
-    }
-
     let text = fs::read_to_string(csv_path)?;
     let mut rows = Vec::new();
     for line in text.lines().skip(1) {
@@ -457,47 +452,77 @@ fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::E
         let d = |i: usize| f64::from_bits(c[i].parse::<i64>().unwrap() as u64);
         let fl = |i: usize| f32::from_bits(c[i].parse::<i32>().unwrap() as u32);
         let b = |i: usize| c[i] == "1";
-        rows.push(Row {
+        rows.push(TraceRow {
             pos: Vec3::new(d(1), d(2), d(3)),
             vel: Vec3::new(d(4), d(5), d(6)),
             yaw: fl(7),
+            pitch: fl(8),
             on_ground: b(9),
             sprinting: b(10),
             sneaking: b(11),
-            keys: Keys {
+            input: ms_kernel::Input {
                 forward: b(12),
                 back: b(13),
                 left: b(14),
                 right: b(15),
+                jump: b(16),
+                shift: b(17),
+                sprint: b(18),
+                yaw: fl(7),
+                pitch: fl(8),
             },
-            jump: b(16),
         });
     }
     if rows.is_empty() {
         return Err("empty trace".into());
     }
+    Ok(rows)
+}
 
-    let world = World::new(region_dir);
+/// A player state seeded from a trace row (the end of that tick).
+fn seed_from(row: &TraceRow) -> ms_kernel::PlayerState {
+    let mut p = ms_kernel::PlayerState::new(row.pos, row.yaw);
+    p.pitch = row.pitch;
+    p.vel = row.vel;
+    p.on_ground = row.on_ground;
+    p.shift_key_down = row.sneaking;
+    // The previous tick's forward impulse (what `hasForwardImpulse` saw before this tick's keys).
+    p.zza = if row.input.forward && !row.input.back {
+        0.98
+    } else {
+        0.0
+    };
+    if row.sprinting {
+        ms_kernel::player::set_sprinting(&mut p, true);
+    }
+    p
+}
+
+/// The world a trace is replayed in: an Anvil save's `region` directory, or `flat:<y>` for a flat
+/// stone world whose floor top is at `y` (enough for sessions recorded on flat ground).
+fn open_world(spec: &str) -> ms_world::World {
+    match spec.strip_prefix("flat:").map(str::parse::<i32>) {
+        Some(Ok(y)) => ms_world::World::flat(y),
+        _ => ms_world::World::new(spec),
+    }
+}
+
+/// Free-runs a recorded walk through the simulation (no per-tick re-seed), reporting the longest
+/// unbroken bit-exact streak. Resyncs to the trace after each divergence to measure subsequent
+/// streaks (so unmodeled regimes — flight/swim/entities — don't poison the whole run).
+fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use ms_arena::Arena;
+
+    let rows = read_trace(csv_path)?;
+    let world = open_world(region_dir);
     let r0 = &rows[0];
     let mut arena = Arena::new(world, r0.pos, r0.yaw);
-    arena.set_state(Player {
-        pos: r0.pos,
-        vel: r0.vel,
-        yaw: r0.yaw,
-        on_ground: r0.on_ground,
-        no_jump_delay: 0,
-    });
+    arena.set_state(seed_from(r0));
 
     let (mut streak, mut best, mut best_start, mut cur_start, mut breaks) = (0, 0, 0, 0, 0);
     for (t, n) in rows.iter().enumerate().skip(1) {
-        arena.step(&Action {
-            keys: n.keys,
-            jump: n.jump,
-            sprinting: n.sprinting,
-            sneaking: n.sneaking,
-            yaw: n.yaw,
-        });
-        let p = arena.player;
+        arena.step(&n.input);
+        let p = &arena.player;
         let exact = p.pos.x.to_bits() == n.pos.x.to_bits()
             && p.pos.y.to_bits() == n.pos.y.to_bits()
             && p.pos.z.to_bits() == n.pos.z.to_bits()
@@ -516,13 +541,14 @@ fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::E
         } else {
             streak = 0;
             breaks += 1;
-            arena.set_state(Player {
-                pos: n.pos,
-                vel: n.vel,
-                yaw: n.yaw,
-                on_ground: n.on_ground,
-                no_jump_delay: p.no_jump_delay,
-            });
+            let mut resynced = arena.get_state();
+            resynced.pos = n.pos;
+            resynced.vel = n.vel;
+            resynced.on_ground = n.on_ground;
+            if resynced.sprinting != n.sprinting {
+                ms_kernel::player::set_sprinting(&mut resynced, n.sprinting);
+            }
+            arena.set_state(resynced);
         }
     }
     println!(
@@ -532,54 +558,12 @@ fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Replays a recorded walk through the full world-collision step, comparing predicted velocity
-/// and position to the trace tick-by-tick (re-seeding state from the trace each tick, so this is
-/// a per-step check). Reports how many ticks reproduce bit-for-bit.
+/// Replays a recorded walk through the full tick, comparing predicted velocity and position to the
+/// trace tick-by-tick (re-seeding state from the trace each tick, so this is a per-step check).
+/// Reports how many ticks reproduce bit-for-bit.
 fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use ms_kernel::player::{step, Keys};
-    use ms_numerics::Vec3;
-    use ms_world::World;
-
-    struct Row {
-        pos: Vec3,
-        vel: Vec3,
-        yaw: f32,
-        on_ground: bool,
-        sprinting: bool,
-        sneaking: bool,
-        keys: Keys,
-        jump: bool,
-    }
-
-    let text = fs::read_to_string(csv_path)?;
-    let mut rows = Vec::new();
-    for line in text.lines().skip(1) {
-        let c: Vec<&str> = line.split(',').collect();
-        if c.len() < 19 {
-            continue;
-        }
-        let d = |i: usize| f64::from_bits(c[i].parse::<i64>().unwrap() as u64);
-        let fl = |i: usize| f32::from_bits(c[i].parse::<i32>().unwrap() as u32);
-        let b = |i: usize| c[i] == "1";
-        rows.push(Row {
-            pos: Vec3::new(d(1), d(2), d(3)),
-            vel: Vec3::new(d(4), d(5), d(6)),
-            yaw: fl(7),
-            on_ground: b(9),
-            sprinting: b(10),
-            sneaking: b(11),
-            keys: Keys {
-                forward: b(12),
-                back: b(13),
-                left: b(14),
-                right: b(15),
-            },
-            jump: b(16),
-        });
-    }
-
-    let world = World::new(region_dir);
-    let mut no_jump_delay = 0i32;
+    let rows = read_trace(csv_path)?;
+    let world = open_world(region_dir);
     let (mut total, mut vel_exact, mut pos_exact, mut diverged) = (0usize, 0usize, 0usize, 0usize);
     // Grounded-walking subset: where collision against terrain actually matters.
     let (mut walk_total, mut walk_exact, mut walk_diverged) = (0usize, 0usize, 0usize);
@@ -589,18 +573,9 @@ fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::erro
         let a = &rows[t];
         let n = &rows[t + 1];
         let walking = a.on_ground && n.on_ground;
-        let (pp, pv, _) = step(
-            a.pos,
-            a.vel,
-            n.yaw,
-            a.on_ground,
-            n.sprinting,
-            n.sneaking,
-            n.keys,
-            n.jump,
-            &mut no_jump_delay,
-            &world,
-        );
+        let mut p = seed_from(a);
+        ms_kernel::player::tick(&mut p, &n.input, &world);
+        let (pp, pv) = (p.pos, p.vel);
         total += 1;
         let ve = pv.x.to_bits() == n.vel.x.to_bits()
             && pv.y.to_bits() == n.vel.y.to_bits()
@@ -638,8 +613,8 @@ fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::erro
                         n.vel.x,
                         n.vel.y,
                         n.vel.z,
-                        n.jump,
-                        n.keys.forward,
+                        n.input.jump,
+                        n.input.forward,
                         n.sprinting,
                         n.yaw
                     );
@@ -660,7 +635,6 @@ fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::erro
 /// debug numbers are not representative.
 fn bench(envs: usize, ticks: usize) {
     use ms_arena::{Action, Arena, BatchArena};
-    use ms_kernel::player::Keys;
     use ms_numerics::Vec3;
     use ms_world::World;
     use std::time::Instant;
@@ -668,16 +642,11 @@ fn bench(envs: usize, ticks: usize) {
     let make = |i: usize| Arena::new(World::flat(0), Vec3::new(0.5, 0.0, 0.5), (i % 360) as f32);
     let actions: Vec<Action> = (0..envs)
         .map(|i| Action {
-            keys: Keys {
-                forward: true,
-                back: false,
-                left: false,
-                right: false,
-            },
+            forward: true,
             jump: true,
-            sprinting: true,
-            sneaking: false,
+            sprint: true,
             yaw: (i % 360) as f32,
+            ..Action::default()
         })
         .collect();
 

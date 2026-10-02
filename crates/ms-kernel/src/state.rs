@@ -94,6 +94,10 @@ pub struct PlayerState {
     pub in_water: bool,
     /// `wasEyeInWater` (`isUnderWater()`).
     pub eye_in_water: bool,
+    /// Whether `fluidOnEyes` holds water: the result of the last `updateFluidOnEyes`, computed from
+    /// that tick's start-of-tick position. The next tick copies it into `eye_in_water`, so the
+    /// recorded flag lags the eye position by one tick. Not recorded in the corpus.
+    pub water_on_eyes: bool,
     /// `isInLava()`.
     pub in_lava: bool,
     pub water_height: f64,
@@ -142,6 +146,9 @@ pub struct PlayerState {
     /// player's movement; its copy of the velocity only decays and is what knockback is computed
     /// from before the result is sent to the client (which replaces its own velocity with it).
     pub server_vel: Vec3,
+    /// The rest of the server-side player that the damage module needs (the server's `onGround`,
+    /// a landing waiting to be turned into fall damage). See `damage::ServerState`.
+    pub server: crate::damage::ServerState,
 }
 
 impl PlayerState {
@@ -161,6 +168,7 @@ impl PlayerState {
             fall_distance: 0.0,
             in_water: false,
             eye_in_water: false,
+            water_on_eyes: false,
             in_lava: false,
             water_height: 0.0,
             lava_height: 0.0,
@@ -197,6 +205,7 @@ impl PlayerState {
             flying: false,
             crouching: false,
             server_vel: Vec3::ZERO,
+            server: crate::damage::ServerState::default(),
         }
     }
 
