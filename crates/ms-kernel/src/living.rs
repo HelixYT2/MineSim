@@ -400,8 +400,9 @@ pub fn ai_step(
         let on = on_pos_legacy(p, world);
         crate::blocks::step_on(p, world, on);
     }
-    let to = p.pos;
-    crate::blocks::apply_effects_from_blocks(p, world, old_pos, to);
+    let mut log = std::mem::take(&mut p.movements);
+    crate::blocks::apply_effects_from_blocks(p, world, &mut log, old_pos);
+    p.movements = log;
 }
 
 /// `Entity.baseTick` + `LivingEntity.baseTick` as the client runs them for the local player.

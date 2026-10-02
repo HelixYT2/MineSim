@@ -146,6 +146,9 @@ pub struct PlayerState {
     /// player's movement; its copy of the velocity only decays and is what knockback is computed
     /// from before the result is sent to the client (which replaces its own velocity with it).
     pub server_vel: Vec3,
+
+    /// The moves of the tick in progress (`Entity.movementThisTick`); empty between ticks.
+    pub movements: crate::blocks::MovementLog,
     /// The rest of the server-side player that the damage module needs (the server's `onGround`,
     /// a landing waiting to be turned into fall damage). See `damage::ServerState`.
     pub server: crate::damage::ServerState,
@@ -205,6 +208,7 @@ impl PlayerState {
             flying: false,
             crouching: false,
             server_vel: Vec3::ZERO,
+            movements: crate::blocks::MovementLog::default(),
             server: crate::damage::ServerState::default(),
         }
     }

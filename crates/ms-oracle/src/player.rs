@@ -226,6 +226,8 @@ pub fn serialize_player(p: &PlayerState, b: &mut StateBuf) {
         server_vel: _,
         server: _,
         water_on_eyes: _,
+        // the moves of the tick in progress: always empty between ticks
+        movements: _,
     } = p;
 
     b.push_u8(CONTRACT_VERSION);

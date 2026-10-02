@@ -298,11 +298,8 @@ pub fn check_fall_damage(
     }
     if on_ground {
         if p.fall_distance > 0.0 {
-            // Block.fallOn -> Entity.causeFallDamage(fallDistance, 1.0F, fall)
-            if let Some(multiplier) = crate::blocks::fall_damage_multiplier(p, world, on_pos) {
-                let fall = p.fall_distance;
-                crate::damage::cause_fall_damage(p, fall, multiplier);
-            }
+            // Block.fallOn -> Entity.causeFallDamage with the block's distance and multiplier.
+            crate::blocks::fall_on(p, world, on_pos);
         }
         reset_fall_distance(p);
     }
@@ -426,7 +423,12 @@ pub fn move_entity(p: &mut PlayerState, world: &World, motion: Vec3) {
                 reset_fall_distance(p);
             }
         }
-        p.pos = Vec3::new(p.pos.x + vec32.x, p.pos.y + vec32.y, p.pos.z + vec32.z);
+        let from = p.pos;
+        let to = Vec3::new(p.pos.x + vec32.x, p.pos.y + vec32.y, p.pos.z + vec32.z);
+        // Entity.addMovementThisTick: the inside-block effects later walk this move.
+        p.movements
+            .record(crate::blocks::Movement::new(from, to, Some(vec3)));
+        p.pos = to;
     }
     let bl = !mth_equal(vec3.x, vec32.x);
     let bl2 = !mth_equal(vec3.z, vec32.z);
