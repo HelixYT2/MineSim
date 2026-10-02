@@ -83,16 +83,23 @@ class DoneCondition(ABC):
 
 
 class FixedSpawn(StateMutator):
-    """Spawn at a fixed point. With ``randomize_yaw`` the facing is drawn uniformly each episode."""
+    """Spawn at a fixed point. With ``randomize_yaw`` the facing is drawn uniformly each episode.
 
-    def __init__(self, x=0.5, y=0.0, z=0.5, yaw=0.0, randomize_yaw=False):
+    ``effects`` is a list of ``(effect_id, amplifier, duration)`` given at every reset, e.g.
+    ``[("minecraft:speed", 1, 1000)]``.
+    """
+
+    def __init__(self, x=0.5, y=0.0, z=0.5, yaw=0.0, randomize_yaw=False, effects=()):
         self.x, self.y, self.z = float(x), float(y), float(z)
         self.yaw = float(yaw)
         self.randomize_yaw = bool(randomize_yaw)
+        self.effects = [tuple(e) for e in effects]
 
     def reset(self, arena: Arena, rng: np.random.Generator) -> None:
         yaw = float(rng.uniform(-180.0, 180.0)) if self.randomize_yaw else self.yaw
         arena.reset(self.x, self.y, self.z, yaw)
+        for effect in self.effects:
+            arena.add_effect(*effect)
 
 
 class ButtonsAction(ActionParser):
@@ -156,6 +163,45 @@ class DefaultObs(ObsBuilder):
         )
 
 
+class PlayerObs(ObsBuilder):
+    """The player's full movement state: velocity, look direction (as sin/cos of yaw and pitch),
+    ground and wall contact, the jump cooldown, sprinting/crouching/swimming, fluid contact, fall
+    distance, health and food. Positions are left out so policies do not memorise coordinates;
+    wrap or extend this to add task-specific features such as a goal offset."""
+
+    _N = 17
+
+    def space(self) -> spaces.Space:
+        return spaces.Box(-np.inf, np.inf, shape=(self._N,), dtype=np.float32)
+
+    def build(self, arena: Arena) -> np.ndarray:
+        vx, vy, vz = arena.vel()
+        yaw = math.radians(arena.yaw())
+        pitch = math.radians(arena.pitch())
+        return np.array(
+            [
+                vx,
+                vy,
+                vz,
+                math.sin(yaw),
+                math.cos(yaw),
+                math.sin(pitch),
+                float(arena.on_ground()),
+                float(arena.horizontal_collision()),
+                arena.jump_cooldown() / 10.0,
+                float(arena.sprinting()),
+                float(arena.crouching()),
+                float(arena.swimming()),
+                float(arena.in_water()),
+                float(arena.in_lava()),
+                min(arena.fall_distance(), 64.0) / 64.0,
+                arena.health() / 20.0,
+                arena.food() / 20.0,
+            ],
+            dtype=np.float32,
+        )
+
+
 class SpeedReward(RewardFunction):
     """Horizontal distance covered this tick — rewards moving as fast as possible."""
 
@@ -169,6 +215,27 @@ class NeverDone(DoneCondition):
 
     def terminated(self, arena: Arena) -> bool:
         return False
+
+
+class Died(DoneCondition):
+    """Terminal once the player's health reaches zero (fall damage, lava, hits)."""
+
+    def terminated(self, arena: Arena) -> bool:
+        return arena.is_dead()
+
+
+class AnyOf(DoneCondition):
+    """Terminal when any of the given conditions is."""
+
+    def __init__(self, *conditions: DoneCondition):
+        self.conditions = conditions
+
+    def reset(self, arena: Arena) -> None:
+        for c in self.conditions:
+            c.reset(arena)
+
+    def terminated(self, arena: Arena) -> bool:
+        return any(c.terminated(arena) for c in self.conditions)
 
 
 class FellBelow(DoneCondition):

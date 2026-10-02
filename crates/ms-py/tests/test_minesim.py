@@ -68,6 +68,7 @@ def test_checkpoint_restore_reproduces_trajectory():
     for _ in range(15):
         arena.step(forward=True, sprint=True, jump=True)
     snapshot = arena.get_state()
+    assert isinstance(snapshot, minesim.State)
     tail = [(True, False, False, False, False, True, False, 0.0) for _ in range(25)]
     expected = [(_apply(arena, a), arena.state_hash())[1] for a in tail]
 
@@ -154,9 +155,72 @@ def test_native_batch_states_shape_and_motion():
     for _ in range(40):
         batch.step(acts)
     st = batch.states()
-    assert st.shape == (n, 9)
+    assert st.shape == (n, len(minesim.Batch.STATE_COLUMNS))
     assert np.all(st[:, 2] > z0 + 5.0), "every env should advance in +z"
     assert len(batch) == n
+
+
+def test_effects_change_movement():
+    plain = minesim.Arena(surface_y=0)
+    fast = minesim.Arena(surface_y=0)
+    assert fast.add_effect("speed", 1, 1000)
+    assert fast.effects() == [("minecraft:speed", 1, 1000)]
+    for _ in range(40):
+        plain.step(forward=True)
+        fast.step(forward=True)
+    assert fast.pos()[2] > plain.pos()[2] * 1.3
+    jump = minesim.Arena(surface_y=0)
+    jump.add_effect("minecraft:jump_boost", 2, 1000)
+    _settle(jump)
+    peak = 0.0
+    for _ in range(30):
+        jump.step(jump=True)
+        peak = max(peak, jump.pos()[1])
+    assert peak > 1.8, f"jump boost III should clear 1.8 blocks, peaked at {peak}"
+
+
+def test_hits_hurt_and_knock_back():
+    arena = minesim.Arena(surface_y=0)
+    _settle(arena)
+    assert arena.hurt(2.0, from_x=0.5, from_z=3.5)
+    assert arena.health() == 18.0
+    arena.step()
+    assert arena.vel()[2] < -0.3, "pushed away from the attacker"
+    assert not arena.hurt(1.0, from_x=0.5, from_z=3.5), "weaker hit inside the invulnerability window"
+
+
+def test_fall_damage_and_death():
+    blocks = [(0, y, 0, "minecraft:stone") for y in range(30)]
+    arena = minesim.Arena(surface_y=0, blocks=blocks, x=0.5, y=30.0, z=0.5)
+    _settle(arena)
+    for _ in range(10):
+        arena.step(forward=True)
+    for _ in range(80):
+        arena.step()
+    assert arena.is_dead(), f"a 30-block fall is lethal, health {arena.health()}"
+
+
+def test_blocks_and_climbing():
+    arena = minesim.Arena(surface_y=0, x=0.5, y=0.0, z=0.5)
+    for y in range(6):
+        arena.set_block(0, y, 2, "minecraft:stone")
+        arena.set_block(0, y, 1, "minecraft:ladder[facing=north]")
+    assert arena.get_block(0, 3, 1).startswith("minecraft:ladder[facing=north")
+    _settle(arena)
+    for _ in range(60):
+        arena.step(forward=True)
+    assert arena.pos()[1] > 3.0, f"walking into a ladder climbs it, y={arena.pos()[1]}"
+
+
+def test_water_slows_and_floats():
+    blocks = [(x, 0, z, "minecraft:water") for x in range(-3, 4) for z in range(-3, 4)]
+    arena = minesim.Arena(surface_y=0, blocks=blocks, x=0.5, y=0.0, z=0.5)
+    for _ in range(20):
+        arena.step()
+    assert arena.in_water()
+    for _ in range(20):
+        arena.step(jump=True)
+    assert arena.vel()[1] > 0.0 or arena.pos()[1] > 0.0
 
 
 def test_native_batch_rejects_bad_action_shape():

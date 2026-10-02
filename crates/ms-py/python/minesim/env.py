@@ -1,7 +1,8 @@
 """A Gymnasium environment over the MineSim arena.
 
 The default task is "move as far as you can" on a flat stone world: button inputs, a velocity
-observation, and a reward equal to the horizontal distance covered each tick. Every part of the
+observation, and a reward equal to the horizontal distance covered each tick; the episode ends if
+the player dies. Every part of the
 task is a swappable component (see :mod:`minesim.components`), so the same env drives anything
 from sprint-jump locomotion to navigation once richer observations and rewards are plugged in.
 """
@@ -17,8 +18,8 @@ from ._core import Arena
 from .components import (
     ButtonsAction,
     DefaultObs,
+    Died,
     FixedSpawn,
-    NeverDone,
     SpeedReward,
 )
 
@@ -27,7 +28,8 @@ class MineSimEnv(gym.Env):
     """A single-agent Minecraft-movement environment.
 
     Parameters mirror the arena: pass ``region_dir`` to play on a real save, otherwise a flat
-    world with its surface at ``surface_y`` (floored with ``floor_block``, default stone) is used.
+    world with its surface at ``surface_y`` (floored with ``floor_block``, default stone) is used,
+    with any ``blocks`` (``(x, y, z, "minecraft:block[props]")`` tuples) placed on it.
     The five task components default to the "move fast" task and can each be overridden.
     """
 
@@ -39,6 +41,7 @@ class MineSimEnv(gym.Env):
         region_dir=None,
         surface_y=0,
         floor_block=None,
+        blocks=None,
         spawn=(0.5, 0.0, 0.5),
         yaw=0.0,
         obs_builder=None,
@@ -55,6 +58,7 @@ class MineSimEnv(gym.Env):
             region_dir=region_dir,
             surface_y=surface_y,
             floor_block=floor_block,
+            blocks=blocks,
             x=x,
             y=y,
             z=z,
@@ -63,7 +67,7 @@ class MineSimEnv(gym.Env):
         self.obs_builder = obs_builder or DefaultObs()
         self.action_parser = action_parser or ButtonsAction()
         self.reward_fn = reward_fn or SpeedReward()
-        self.done_condition = done_condition or NeverDone()
+        self.done_condition = done_condition or Died()
         self.state_mutator = state_mutator or FixedSpawn(x, y, z, yaw=yaw)
         self.max_episode_ticks = int(max_episode_ticks)
 

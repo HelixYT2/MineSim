@@ -18,3 +18,4 @@ ms-arena = { workspace = true }
 ms-kernel = { workspace = true }
 ms-numerics = { workspace = true }
 ms-world = { workspace = true }
+ms-data = { workspace = true }

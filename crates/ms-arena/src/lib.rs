@@ -55,6 +55,22 @@ impl Arena {
         self.world = world;
     }
 
+    /// Place a block state in this arena's world. A flat world becomes a built one on the first
+    /// edit; a world shared with other arenas is copied on write, so the others are unaffected.
+    /// Saves loaded from Anvil regions are read-only.
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> Result<(), String> {
+        if let World::Flat(flat) = &self.world {
+            self.world = World::grid(ms_world::GridWorld::new(*flat));
+        }
+        match &mut self.world {
+            World::Grid(grid) => {
+                std::sync::Arc::make_mut(grid).set_block(x, y, z, state);
+                Ok(())
+            }
+            _ => Err("blocks cannot be placed in a world loaded from region files".into()),
+        }
+    }
+
     /// Advance one game tick.
     pub fn step(&mut self, action: &Action) {
         let p = &mut self.player;

@@ -6,17 +6,139 @@
 // reports as a useless conversion in code we don't author. Allow it for this binding shim only.
 #![allow(clippy::useless_conversion)]
 
-use ms_arena::{Action, Arena, BatchArena};
+use ms_arena::{Action, Arena, BatchArena, PlayerState};
 use ms_numerics::Vec3;
-use ms_world::World;
+use ms_world::{FlatWorld, GridWorld, World};
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
-/// The full player state, as a flat tuple: position, velocity, yaw, on-ground, jump cooldown.
-type State = (f64, f64, f64, f64, f64, f64, f32, bool, i32);
+/// Columns of [`PyBatch::states`], in order.
+const STATE_COLUMNS: [&str; 18] = [
+    "x",
+    "y",
+    "z",
+    "vx",
+    "vy",
+    "vz",
+    "yaw",
+    "pitch",
+    "on_ground",
+    "jump_cooldown",
+    "health",
+    "food",
+    "sprinting",
+    "crouching",
+    "in_water",
+    "in_lava",
+    "swimming",
+    "fall_distance",
+];
 
-#[pyclass(name = "Arena")]
+fn parse_state(text: &str) -> PyResult<u32> {
+    ms_data::parse_state(text)
+        .ok_or_else(|| PyValueError::new_err(format!("unknown block state '{text}'")))
+}
+
+/// The world described by the constructor arguments: a save, or a flat floor plus placed blocks.
+fn build_world(
+    region_dir: Option<String>,
+    surface_y: i32,
+    floor_block: Option<&str>,
+    blocks: Option<Vec<(i32, i32, i32, String)>>,
+) -> PyResult<World> {
+    if let Some(dir) = region_dir {
+        if blocks.is_some() {
+            return Err(PyValueError::new_err(
+                "blocks cannot be combined with region_dir",
+            ));
+        }
+        return Ok(World::new(dir));
+    }
+    let floor = parse_state(floor_block.unwrap_or("minecraft:stone"))?;
+    let base = FlatWorld::new(surface_y, floor);
+    match blocks {
+        None => Ok(World::Flat(base)),
+        Some(list) => {
+            let mut grid = GridWorld::new(base);
+            for (x, y, z, state) in list {
+                grid.set_block(x, y, z, parse_state(&state)?);
+            }
+            Ok(World::grid(grid))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn action(
+    forward: bool,
+    back: bool,
+    left: bool,
+    right: bool,
+    jump: bool,
+    sprint: bool,
+    sneak: bool,
+    yaw: f32,
+    pitch: f32,
+) -> Action {
+    Action {
+        forward,
+        back,
+        left,
+        right,
+        jump,
+        shift: sneak,
+        sprint,
+        yaw,
+        pitch,
+    }
+}
+
+fn state_row(p: &PlayerState) -> [f64; 18] {
+    let b = |v: bool| f64::from(u8::from(v));
+    [
+        p.pos.x,
+        p.pos.y,
+        p.pos.z,
+        p.vel.x,
+        p.vel.y,
+        p.vel.z,
+        f64::from(p.yaw),
+        f64::from(p.pitch),
+        b(p.on_ground),
+        f64::from(p.no_jump_delay),
+        f64::from(p.health),
+        f64::from(p.food),
+        b(p.sprinting),
+        b(p.crouching),
+        b(p.in_water),
+        b(p.in_lava),
+        b(p.swimming),
+        p.fall_distance,
+    ]
+}
+
+/// An opaque snapshot of the complete simulated state, for checkpoint/restore.
+#[pyclass(name = "State", module = "minesim._core")]
+#[derive(Clone)]
+struct PyState {
+    inner: PlayerState,
+}
+
+#[pymethods]
+impl PyState {
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+}
+
+#[pyclass(name = "Arena", module = "minesim._core")]
 struct PyArena {
     inner: Arena,
 }
@@ -25,40 +147,41 @@ struct PyArena {
 impl PyArena {
     /// Build an arena. With `region_dir` set, blocks come from that save's Anvil regions;
     /// otherwise the world is a flat floor of `floor_block` (default stone) with its top face at
-    /// `surface_y`. The player spawns at `(x, y, z)` looking along `yaw`, at rest.
+    /// `surface_y`, plus any `blocks` given as `(x, y, z, "minecraft:block[prop=value]")` tuples.
+    /// The player spawns at `(x, y, z)` looking along `yaw`, at rest.
     #[new]
-    #[pyo3(signature = (region_dir=None, surface_y=0, floor_block=None, x=0.5, y=0.0, z=0.5, yaw=0.0))]
+    #[pyo3(signature = (region_dir=None, surface_y=0, floor_block=None, blocks=None, x=0.5, y=0.0, z=0.5, yaw=0.0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         region_dir: Option<String>,
         surface_y: i32,
         floor_block: Option<String>,
+        blocks: Option<Vec<(i32, i32, i32, String)>>,
         x: f64,
         y: f64,
         z: f64,
         yaw: f32,
     ) -> PyResult<Self> {
-        let world = match region_dir {
-            Some(dir) => World::new(dir),
-            None => match floor_block {
-                Some(b) => World::flat_of(surface_y, &b)
-                    .map_err(pyo3::exceptions::PyValueError::new_err)?,
-                None => World::flat(surface_y),
-            },
-        };
+        let world = build_world(region_dir, surface_y, floor_block.as_deref(), blocks)?;
         Ok(Self {
             inner: Arena::new(world, Vec3::new(x, y, z), yaw),
         })
     }
 
-    /// Reset the player to a position/orientation, at rest. The world is unchanged.
-    #[pyo3(signature = (x=0.5, y=0.0, z=0.5, yaw=0.0))]
-    fn reset(&mut self, x: f64, y: f64, z: f64, yaw: f32) {
+    /// Reset the player to a position/orientation, at rest, with full health and food and no
+    /// effects. The world is unchanged.
+    #[pyo3(signature = (x=0.5, y=0.0, z=0.5, yaw=0.0, pitch=0.0))]
+    fn reset(&mut self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) {
         self.inner.reset(Vec3::new(x, y, z), yaw);
+        self.inner.player.pitch = pitch;
     }
 
-    /// Advance one tick from the given inputs.
+    /// Advance one game tick. The arguments are the keys held this tick and the absolute look
+    /// direction; `sprint` and `sneak` are the sprint and sneak keys, so sprinting and crouching
+    /// follow the game's own rules (e.g. sprinting needs forward and more than 6 food). Omitting
+    /// `pitch` keeps the current one.
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    #[pyo3(signature = (forward=false, back=false, left=false, right=false, jump=false, sprint=false, sneak=false, yaw=0.0))]
+    #[pyo3(signature = (forward=false, back=false, left=false, right=false, jump=false, sprint=false, sneak=false, yaw=0.0, pitch=None))]
     fn step(
         &mut self,
         forward: bool,
@@ -69,18 +192,12 @@ impl PyArena {
         sprint: bool,
         sneak: bool,
         yaw: f32,
+        pitch: Option<f32>,
     ) {
-        self.inner.step(&Action {
-            forward,
-            back,
-            left,
-            right,
-            jump,
-            shift: sneak,
-            sprint,
-            yaw,
-            pitch: 0.0,
-        });
+        let pitch = pitch.unwrap_or(self.inner.player.pitch);
+        self.inner.step(&action(
+            forward, back, left, right, jump, sprint, sneak, yaw, pitch,
+        ));
     }
 
     fn pos(&self) -> (f64, f64, f64) {
@@ -97,6 +214,10 @@ impl PyArena {
         self.inner.player.yaw
     }
 
+    fn pitch(&self) -> f32 {
+        self.inner.player.pitch
+    }
+
     fn on_ground(&self) -> bool {
         self.inner.player.on_ground
     }
@@ -106,45 +227,174 @@ impl PyArena {
         self.inner.player.no_jump_delay
     }
 
+    fn health(&self) -> f32 {
+        self.inner.player.health
+    }
+
+    fn food(&self) -> i32 {
+        self.inner.player.food
+    }
+
+    fn is_dead(&self) -> bool {
+        self.inner.is_dead()
+    }
+
+    fn sprinting(&self) -> bool {
+        self.inner.player.sprinting
+    }
+
+    fn crouching(&self) -> bool {
+        self.inner.player.crouching
+    }
+
+    fn in_water(&self) -> bool {
+        self.inner.player.in_water
+    }
+
+    fn in_lava(&self) -> bool {
+        self.inner.player.in_lava
+    }
+
+    fn swimming(&self) -> bool {
+        self.inner.player.swimming
+    }
+
+    fn fall_distance(&self) -> f64 {
+        self.inner.player.fall_distance
+    }
+
+    fn horizontal_collision(&self) -> bool {
+        self.inner.player.horizontal_collision
+    }
+
+    /// The pose: "STANDING", "CROUCHING" or "SWIMMING".
+    fn pose(&self) -> &'static str {
+        self.inner.player.pose.name()
+    }
+
+    /// Active effects as `(id, amplifier, remaining_ticks)` tuples.
+    fn effects(&self) -> Vec<(String, i32, i32)> {
+        self.inner
+            .player
+            .effects
+            .iter()
+            .map(|e| (e.id.clone(), e.amplifier, e.duration))
+            .collect()
+    }
+
+    /// Everything above as one dict (handy for observations and debugging).
+    fn state_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new_bound(py);
+        let row = state_row(&self.inner.player);
+        for (k, v) in STATE_COLUMNS.iter().zip(row) {
+            d.set_item(*k, v)?;
+        }
+        d.set_item("pose", self.pose())?;
+        d.set_item("effects", self.effects())?;
+        Ok(d)
+    }
+
+    /// Give the player a status effect, e.g. `add_effect("minecraft:speed", 1, 600)` (amplifier
+    /// 1 = Speed II, 600 ticks). Returns whether it changed anything (vanilla's replacement rules).
+    #[pyo3(signature = (effect, amplifier=0, duration=600))]
+    fn add_effect(&mut self, effect: &str, amplifier: i32, duration: i32) -> bool {
+        self.inner.add_effect(&qualify(effect), amplifier, duration)
+    }
+
+    fn remove_effect(&mut self, effect: &str) -> bool {
+        self.inner.remove_effect(&qualify(effect))
+    }
+
+    fn clear_effects(&mut self) -> bool {
+        self.inner.clear_effects()
+    }
+
+    /// Damage the player. With a source point `(from_x, from_z)` it is a mob attack from there,
+    /// with the game's knockback away from it; without one there is no knockback. Returns whether
+    /// the hit landed (the invulnerability window blocks weaker repeat hits).
+    #[pyo3(signature = (amount, from_x=None, from_z=None))]
+    fn hurt(&mut self, amount: f32, from_x: Option<f64>, from_z: Option<f64>) -> PyResult<bool> {
+        match (from_x, from_z) {
+            (Some(x), Some(z)) => Ok(self.inner.hurt_from(amount, x, z)),
+            (None, None) => Ok(self.inner.hurt(amount)),
+            _ => Err(PyValueError::new_err(
+                "give both from_x and from_z, or neither",
+            )),
+        }
+    }
+
+    /// `LivingEntity.knockback(strength, dx, dz)`: a push of `strength` opposite to `(dx, dz)`.
+    fn knockback(&mut self, strength: f64, dx: f64, dz: f64) {
+        self.inner.knockback(strength, dx, dz);
+    }
+
+    /// Move the player (velocity reset unless given).
+    #[pyo3(signature = (x, y, z, yaw=None, pitch=None, vel=(0.0, 0.0, 0.0)))]
+    #[allow(clippy::too_many_arguments)]
+    fn teleport(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: Option<f32>,
+        pitch: Option<f32>,
+        vel: (f64, f64, f64),
+    ) {
+        let yaw = yaw.unwrap_or(self.inner.player.yaw);
+        let pitch = pitch.unwrap_or(self.inner.player.pitch);
+        self.inner.teleport(
+            Vec3::new(x, y, z),
+            Vec3::new(vel.0, vel.1, vel.2),
+            yaw,
+            pitch,
+        );
+    }
+
+    /// Place a block, e.g. `set_block(3, 0, 5, "minecraft:ladder[facing=north]")`.
+    fn set_block(&mut self, x: i32, y: i32, z: i32, state: &str) -> PyResult<()> {
+        let s = parse_state(state)?;
+        self.inner
+            .set_block(x, y, z, s)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// The block state at a coordinate, e.g. `"minecraft:oak_stairs[facing=east,...]"`.
+    fn get_block(&self, x: i32, y: i32, z: i32) -> String {
+        ms_data::state_to_string(self.inner.world().block_state(x, y, z))
+    }
+
     /// The canonical per-tick state hash (`docs/contract.md`).
     fn state_hash(&self) -> u64 {
         self.inner.state_hash()
     }
 
-    /// The full player state, for checkpoint/restore.
-    fn get_state(&self) -> State {
-        let p = &self.inner.player;
-        (
-            p.pos.x,
-            p.pos.y,
-            p.pos.z,
-            p.vel.x,
-            p.vel.y,
-            p.vel.z,
-            p.yaw,
-            p.on_ground,
-            p.no_jump_delay,
-        )
+    /// A snapshot of the complete state, for checkpoint/restore.
+    fn get_state(&self) -> PyState {
+        PyState {
+            inner: self.inner.get_state(),
+        }
     }
 
-    /// Restore a state previously returned by [`get_state`]: the position, velocity, yaw, ground
-    /// flag and jump cooldown it carries are written into the current player state (the bindings
-    /// are due to expose the full state later).
-    fn set_state(&mut self, state: State) {
-        let mut p = self.inner.get_state();
-        p.pos = Vec3::new(state.0, state.1, state.2);
-        p.vel = Vec3::new(state.3, state.4, state.5);
-        p.yaw = state.6;
-        p.on_ground = state.7;
-        p.no_jump_delay = state.8;
-        self.inner.set_state(p);
+    /// Restore a snapshot taken with [`get_state`].
+    fn set_state(&mut self, state: &PyState) {
+        self.inner.set_state(state.inner.clone());
     }
 }
 
-/// A batch of independent flat-world arenas stepped together. The physics step runs across the
-/// rayon thread pool with the GIL released, so this is the throughput path for collecting
-/// reinforcement-learning rollouts from Python. Inputs and outputs are numpy arrays.
-#[pyclass(name = "Batch")]
+/// Accept `"speed"` for `"minecraft:speed"`.
+fn qualify(id: &str) -> String {
+    if id.contains(':') {
+        id.to_string()
+    } else {
+        format!("minecraft:{id}")
+    }
+}
+
+/// A batch of independent arenas stepped together. The physics step runs across the rayon thread
+/// pool with the GIL released, so this is the throughput path for collecting reinforcement-learning
+/// rollouts from Python. Inputs and outputs are numpy arrays. All environments share one world
+/// (built once); an environment that edits its world gets its own copy.
+#[pyclass(name = "Batch", module = "minesim._core")]
 struct PyBatch {
     inner: BatchArena,
 }
@@ -152,23 +402,20 @@ struct PyBatch {
 #[pymethods]
 impl PyBatch {
     #[new]
-    #[pyo3(signature = (num_envs, surface_y=0, floor_block=None, x=0.5, y=0.0, z=0.5, yaw=0.0))]
+    #[pyo3(signature = (num_envs, surface_y=0, floor_block=None, blocks=None, x=0.5, y=0.0, z=0.5, yaw=0.0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         num_envs: usize,
         surface_y: i32,
         floor_block: Option<String>,
+        blocks: Option<Vec<(i32, i32, i32, String)>>,
         x: f64,
         y: f64,
         z: f64,
         yaw: f32,
     ) -> PyResult<Self> {
         let spawn = Vec3::new(x, y, z);
-        let world = match &floor_block {
-            Some(b) => {
-                World::flat_of(surface_y, b).map_err(pyo3::exceptions::PyValueError::new_err)?
-            }
-            None => World::flat(surface_y),
-        };
+        let world = build_world(None, surface_y, floor_block.as_deref(), blocks)?;
         Ok(Self {
             inner: BatchArena::from_fn(num_envs, |_| Arena::new(world.clone(), spawn, yaw)),
         })
@@ -189,56 +436,111 @@ impl PyBatch {
         self.inner.reset_all(Vec3::new(x, y, z), yaw);
     }
 
-    /// Advance every environment one tick. `actions` is an `(n, 8)` array whose columns are
-    /// forward, back, left, right, jump, sprint, sneak (nonzero = pressed) and an absolute yaw.
+    /// Reset the listed environments to a spawn, at rest.
+    #[pyo3(signature = (indices, x=0.5, y=0.0, z=0.5, yaw=0.0))]
+    fn reset(&mut self, indices: Vec<usize>, x: f64, y: f64, z: f64, yaw: f32) -> PyResult<()> {
+        let n = self.inner.len();
+        for i in indices {
+            if i >= n {
+                return Err(PyValueError::new_err(format!(
+                    "env index {i} out of range ({n})"
+                )));
+            }
+            self.inner.arena_mut(i).reset(Vec3::new(x, y, z), yaw);
+        }
+        Ok(())
+    }
+
+    /// Advance every environment one tick. `actions` is an `(n, 8)` or `(n, 9)` array whose
+    /// columns are forward, back, left, right, jump, sprint, sneak (nonzero = held), the absolute
+    /// yaw, and optionally the absolute pitch.
     fn step(&mut self, py: Python<'_>, actions: PyReadonlyArray2<'_, f64>) -> PyResult<()> {
         let a = actions.as_array();
         let n = self.inner.len();
-        if a.shape() != [n, 8] {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "actions must have shape ({n}, 8), got {:?}",
+        let cols = a.shape()[1];
+        if a.shape()[0] != n || !(cols == 8 || cols == 9) {
+            return Err(PyValueError::new_err(format!(
+                "actions must have shape ({n}, 8) or ({n}, 9), got {:?}",
                 a.shape()
             )));
         }
         let acts: Vec<Action> = (0..n)
-            .map(|i| Action {
-                forward: a[[i, 0]] != 0.0,
-                back: a[[i, 1]] != 0.0,
-                left: a[[i, 2]] != 0.0,
-                right: a[[i, 3]] != 0.0,
-                jump: a[[i, 4]] != 0.0,
-                sprint: a[[i, 5]] != 0.0,
-                shift: a[[i, 6]] != 0.0,
-                yaw: a[[i, 7]] as f32,
-                pitch: 0.0,
+            .map(|i| {
+                let pitch = if cols == 9 {
+                    a[[i, 8]] as f32
+                } else {
+                    self.inner.arena(i).player.pitch
+                };
+                action(
+                    a[[i, 0]] != 0.0,
+                    a[[i, 1]] != 0.0,
+                    a[[i, 2]] != 0.0,
+                    a[[i, 3]] != 0.0,
+                    a[[i, 4]] != 0.0,
+                    a[[i, 5]] != 0.0,
+                    a[[i, 6]] != 0.0,
+                    a[[i, 7]] as f32,
+                    pitch,
+                )
             })
             .collect();
         py.allow_threads(|| self.inner.step(&acts));
         Ok(())
     }
 
-    /// The full state of every environment as an `(n, 9)` array: position (x, y, z), velocity
-    /// (x, y, z), yaw, on-ground (0 or 1), and jump cooldown.
+    /// The state of every environment as an `(n, 18)` array; the column names are
+    /// `Batch.STATE_COLUMNS`.
     fn states<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         let n = self.inner.len();
-        let mut data = Vec::with_capacity(n * 9);
+        let mut data = Vec::with_capacity(n * STATE_COLUMNS.len());
         for i in 0..n {
-            let p = &self.inner.arena(i).player;
-            data.extend_from_slice(&[
-                p.pos.x,
-                p.pos.y,
-                p.pos.z,
-                p.vel.x,
-                p.vel.y,
-                p.vel.z,
-                f64::from(p.yaw),
-                f64::from(u8::from(p.on_ground)),
-                f64::from(p.no_jump_delay),
-            ]);
+            data.extend_from_slice(&state_row(&self.inner.arena(i).player));
         }
-        Array2::from_shape_vec((n, 9), data)
-            .expect("state buffer is exactly n*9 elements")
+        Array2::from_shape_vec((n, STATE_COLUMNS.len()), data)
+            .expect("state buffer is exactly n*18 elements")
             .into_pyarray_bound(py)
+    }
+
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn STATE_COLUMNS() -> Vec<&'static str> {
+        STATE_COLUMNS.to_vec()
+    }
+
+    /// Give environment `i` a status effect.
+    #[pyo3(signature = (i, effect, amplifier=0, duration=600))]
+    fn add_effect(
+        &mut self,
+        i: usize,
+        effect: &str,
+        amplifier: i32,
+        duration: i32,
+    ) -> PyResult<bool> {
+        self.check(i)?;
+        Ok(self
+            .inner
+            .arena_mut(i)
+            .add_effect(&qualify(effect), amplifier, duration))
+    }
+
+    /// Damage environment `i`'s player (from a point, with knockback, if given).
+    #[pyo3(signature = (i, amount, from_x=None, from_z=None))]
+    fn hurt(
+        &mut self,
+        i: usize,
+        amount: f32,
+        from_x: Option<f64>,
+        from_z: Option<f64>,
+    ) -> PyResult<bool> {
+        self.check(i)?;
+        let a = self.inner.arena_mut(i);
+        match (from_x, from_z) {
+            (Some(x), Some(z)) => Ok(a.hurt_from(amount, x, z)),
+            (None, None) => Ok(a.hurt(amount)),
+            _ => Err(PyValueError::new_err(
+                "give both from_x and from_z, or neither",
+            )),
+        }
     }
 
     /// The per-environment canonical state hashes as an `(n,)` array.
@@ -247,10 +549,24 @@ impl PyBatch {
     }
 }
 
+impl PyBatch {
+    fn check(&self, i: usize) -> PyResult<()> {
+        if i < self.inner.len() {
+            Ok(())
+        } else {
+            Err(PyValueError::new_err(format!(
+                "env index {i} out of range ({})",
+                self.inner.len()
+            )))
+        }
+    }
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyArena>()?;
     m.add_class::<PyBatch>()?;
+    m.add_class::<PyState>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

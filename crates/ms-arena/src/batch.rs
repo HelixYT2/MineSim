@@ -48,6 +48,10 @@ impl BatchArena {
         &self.arenas[i]
     }
 
+    pub fn arena_mut(&mut self, i: usize) -> &mut Arena {
+        &mut self.arenas[i]
+    }
+
     /// Advance every arena by one tick from its matching action, across the rayon thread pool.
     pub fn step(&mut self, actions: &[Action]) {
         assert_eq!(
