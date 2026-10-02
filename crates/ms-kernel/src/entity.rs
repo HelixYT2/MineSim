@@ -393,10 +393,9 @@ fn segment_hits_box(from: Vec3, dir: Vec3, b: Aabb) -> bool {
 /// `Entity.move(MoverType.SELF, motion)` for the (physics-enabled) local player: consume the stuck
 /// multiplier, back off edges when sneaking, collide, advance the position, update the collision
 /// flags, ground and supporting block, check fall damage, zero velocity components that hit a wall,
-/// let the landed-on block react, and apply the block speed factor.
-///
-/// `minor_collision` tells whether a horizontal hit counts as minor (see
-/// [`crate::input::is_horizontal_collision_minor`]).
+/// let the landed-on block react, and apply the block speed factor. A horizontal hit is classified
+/// as minor (nearly head-on) with [`crate::input::is_horizontal_collision_minor`], which decides
+/// whether sprinting survives it.
 pub fn move_entity(p: &mut PlayerState, world: &World, motion: Vec3) {
     let mut vec3 = motion;
     if length_sqr(p.stuck_speed_multiplier) > 1.0E-7 {

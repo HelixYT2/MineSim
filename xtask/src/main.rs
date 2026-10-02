@@ -46,7 +46,7 @@ fn main() -> ExitCode {
         Some("replay-walk") => {
             let a: Vec<String> = std::env::args().skip(2).collect();
             if a.len() != 2 {
-                eprintln!("usage: cargo xtask replay-walk <region-dir> <trace-csv>");
+                eprintln!("usage: cargo xtask replay-walk <region-dir|flat:Y> <trace-csv>");
                 return ExitCode::from(2);
             }
             match replay_walk(&a[0], &a[1]) {
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
         Some("freerun") => {
             let a: Vec<String> = std::env::args().skip(2).collect();
             if a.len() != 2 {
-                eprintln!("usage: cargo xtask freerun <region-dir> <trace-csv>");
+                eprintln!("usage: cargo xtask freerun <region-dir|flat:Y> <trace-csv>");
                 return ExitCode::from(2);
             }
             match freerun(&a[0], &a[1]) {
@@ -494,15 +494,23 @@ fn seed_from(row: &TraceRow) -> ms_kernel::PlayerState {
     p
 }
 
+/// The world a trace is replayed in: an Anvil save's `region` directory, or `flat:<y>` for a flat
+/// stone world whose floor top is at `y` (enough for sessions recorded on flat ground).
+fn open_world(spec: &str) -> ms_world::World {
+    match spec.strip_prefix("flat:").map(str::parse::<i32>) {
+        Some(Ok(y)) => ms_world::World::flat(y),
+        _ => ms_world::World::new(spec),
+    }
+}
+
 /// Free-runs a recorded walk through the simulation (no per-tick re-seed), reporting the longest
 /// unbroken bit-exact streak. Resyncs to the trace after each divergence to measure subsequent
 /// streaks (so unmodeled regimes — flight/swim/entities — don't poison the whole run).
 fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     use ms_arena::Arena;
-    use ms_world::World;
 
     let rows = read_trace(csv_path)?;
-    let world = World::new(region_dir);
+    let world = open_world(region_dir);
     let r0 = &rows[0];
     let mut arena = Arena::new(world, r0.pos, r0.yaw);
     arena.set_state(seed_from(r0));
@@ -550,10 +558,8 @@ fn freerun(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::E
 /// trace tick-by-tick (re-seeding state from the trace each tick, so this is a per-step check).
 /// Reports how many ticks reproduce bit-for-bit.
 fn replay_walk(region_dir: &str, csv_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use ms_world::World;
-
     let rows = read_trace(csv_path)?;
-    let world = World::new(region_dir);
+    let world = open_world(region_dir);
     let (mut total, mut vel_exact, mut pos_exact, mut diverged) = (0usize, 0usize, 0usize, 0usize);
     // Grounded-walking subset: where collision against terrain actually matters.
     let (mut walk_total, mut walk_exact, mut walk_diverged) = (0usize, 0usize, 0usize);
