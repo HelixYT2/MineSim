@@ -133,9 +133,9 @@
     },
     "lava_pool": {
       "checkpoints": "809051e0 5439af25 405a8362 d06c6e4b 286b0c42 64f77dd4 d8c384f4 ac7dc1a3 d3a404e9 0b28aeee",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0x0b28aeeeda1cfcf1",
-      "sim": "0x1ec2602cb24ed7b0",
+      "sim": "0x0b28aeeeda1cfcf1",
       "ticks": 160
     },
     "ledge_fall": {
@@ -266,9 +266,9 @@
     },
     "water_swim": {
       "checkpoints": "eda58b9a a2065122 2c494bd3 c5376734 21d4e492 e35d58ec 050bf076 3fdfa7b0 7b90bddd 6dd3b1e9 9f10cb24 d44591a3 c1e13206",
-      "frozen": false,
+      "frozen": true,
       "oracle": "0xc1e132068d298806",
-      "sim": "0x1cd8378ba2df9451",
+      "sim": "0xc1e132068d298806",
       "ticks": 200
     }
   }

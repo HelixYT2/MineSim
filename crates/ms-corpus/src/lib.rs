@@ -156,6 +156,12 @@ impl Scenario {
     pub fn initial_state(&self) -> PlayerState {
         let mut p = PlayerState::new(Vec3::ZERO, 0.0);
         apply_pre(&mut p, &self.rows[0].pre, None);
+        // The recording does not hold the eye-in-water result the previous tick computed (the
+        // tick copies it into `eye_in_water` before computing its own); recompute it from the
+        // starting position.
+        let mut probe = p.clone();
+        ms_kernel::fluids::update_fluid_on_eyes(&mut probe, &self.world());
+        p.water_on_eyes = probe.water_on_eyes;
         p
     }
 }

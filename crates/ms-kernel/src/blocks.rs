@@ -642,24 +642,35 @@ fn make_stuck_in_block(p: &mut PlayerState, multiplier: Vec3) {
 }
 
 /// The inside-block effects that are deferred until the traversal is over and then applied in
-/// enum order within each step (`InsideBlockEffectType`; the ones that nothing wired up yet —
-/// clear-freeze, the two ignitions — are left out).
+/// enum order within each step (`InsideBlockEffectType`; fire blocks' `FIRE_IGNITE` needs the
+/// server's random and is left out).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum InsideEffect {
     /// Powder snow: the player counts as being in powder snow, and freezes one tick further.
     Freeze,
+    /// Lava: thaw.
+    ClearFreeze,
+    /// Lava: set on fire for 15 seconds, then `lavaHurt` (4 damage unless fire resistant).
+    LavaIgnite,
     /// Powder snow and water: put out the fire.
     Extinguish,
 }
 
 impl InsideEffect {
     /// `InsideBlockEffectType.values()` order.
-    const ORDER: [InsideEffect; 2] = [InsideEffect::Freeze, InsideEffect::Extinguish];
+    const ORDER: [InsideEffect; 4] = [
+        InsideEffect::Freeze,
+        InsideEffect::ClearFreeze,
+        InsideEffect::LavaIgnite,
+        InsideEffect::Extinguish,
+    ];
 
     fn bit(self) -> u8 {
         match self {
             InsideEffect::Freeze => 1,
-            InsideEffect::Extinguish => 2,
+            InsideEffect::ClearFreeze => 2,
+            InsideEffect::LavaIgnite => 4,
+            InsideEffect::Extinguish => 8,
         }
     }
 
@@ -671,6 +682,14 @@ impl InsideEffect {
             InsideEffect::Freeze => {
                 p.in_powder_snow = true;
                 p.ticks_frozen = p.ticks_frozen.saturating_add(1).min(140);
+            }
+            InsideEffect::ClearFreeze => crate::fluids::clear_freeze(p),
+            InsideEffect::LavaIgnite => {
+                crate::fluids::lava_ignite(p);
+                // runAfter(LAVA_IGNITE, Entity::lavaHurt): server-side fire damage.
+                if !p.effects.has("minecraft:fire_resistance") {
+                    damage::hurt(p, DamageSource::Generic, 4.0);
+                }
             }
             InsideEffect::Extinguish => {
                 p.remaining_fire_ticks = p.remaining_fire_ticks.min(0);
@@ -907,6 +926,32 @@ impl Walk<'_> {
                 f64::from(z) + 1.0,
             ));
         self.entity_inside(kind, state, pos, precise);
+
+        // FluidState.entityInside, when the moving box touches the fluid's own box
+        // (Entity.collidedWithFluid).
+        let fluid = ms_data::fluid(state);
+        if !fluid.is_empty() {
+            let height = f64::from(crate::fluids::fluid_height_at(self.world, x, y, z, fluid));
+            let fluid_box = Aabb::from_corners(
+                f64::from(x),
+                f64::from(y),
+                f64::from(z),
+                f64::from(x) + 1.0,
+                f64::from(y) + height,
+                f64::from(z) + 1.0,
+            );
+            if collided_along_vector(bounding_box_at(self.p, from), sub(to, from), &[fluid_box]) {
+                self.collector.advance_step(step);
+                match fluid.kind {
+                    ms_data::FluidKind::Lava => {
+                        self.collector.apply(InsideEffect::ClearFreeze);
+                        self.collector.apply(InsideEffect::LavaIgnite);
+                    }
+                    ms_data::FluidKind::Water => self.collector.apply(InsideEffect::Extinguish),
+                    ms_data::FluidKind::Empty => {}
+                }
+            }
+        }
     }
 
     /// `BlockState.entityInside` for the blocks that act on the player.

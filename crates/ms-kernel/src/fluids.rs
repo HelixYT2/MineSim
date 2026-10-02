@@ -160,7 +160,7 @@ fn same_fluid(a: Fluid, b: Fluid) -> bool {
 
 /// `FluidState.getHeight`: the fluid's own height, except that fluid of the same kind above
 /// makes the block read as full (`FlowingFluid.hasSameAbove`).
-fn fluid_height_at(world: &World, x: i32, y: i32, z: i32, f: Fluid) -> f32 {
+pub(crate) fn fluid_height_at(world: &World, x: i32, y: i32, z: i32, f: Fluid) -> f32 {
     if same_fluid(f, fluid_at(world, x, y + 1, z)) {
         1.0
     } else {
