@@ -60,6 +60,15 @@ Scenario.of("ladder_climb", "Climbing a ladder by walking into it ...")
 
 Add it to `Scenarios.all()`, record it, and commit the trace.
 
+A scenario can hold several independent "lanes": `Scenarios.place(s, x, y, z, yaw)` teleports the
+standing player to a start spot (a server action, replayed through the `pre` diff), and
+`probe(s, targetX, targetZ, yaw, lateral, dist)` does the same relative to a block it is about to walk
+into. Keep the player alive (`heal()` between lanes that hurt it: a dead player freezes the rest of
+the run), inside the arena box, and remember that the world is dumped after `settle`, so blocks that
+tick (scaffolding, fluids) end up in their settled states, and the player moves during `settle` if
+it stands in a current or on unsupported blocks. Check a recording with the player's final health and
+position before committing it.
+
 ## Building
 
 Java 21 and the Gradle wrapper: `./gradlew build`. The access widener
