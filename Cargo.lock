@@ -313,6 +313,9 @@ dependencies = [
 [[package]]
 name = "ms-rng"
 version = "0.0.0"
+dependencies = [
+ "ms-numerics",
+]
 
 [[package]]
 name = "ms-world"

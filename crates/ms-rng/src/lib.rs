@@ -1,33 +1,126 @@
-//! The game's random number generators.
+//! The game's random number generators, bit-exact.
 //!
-//! `java.util.Random` is the 48-bit linear congruential generator the JVM ships. Its output is
-//! reproduced here exactly, including the rejection loop in bounded `nextInt` and the bit layout
-//! of the float and double draws; the tests check it against sequences dumped from the JVM.
+//! * [`JavaRandom`]: `java.util.Random`, the 48-bit LCG the JVM ships.
+//! * [`LegacyRandomSource`]: `net.minecraft.world.level.levelgen.LegacyRandomSource`, the
+//!   generator behind `RandomSource.create(seed)`. Every entity's `random` field is one of these
+//!   (vanilla seeds it from `RandomSupport.generateUniqueSeed()`, i.e. non-deterministically; the
+//!   simulator seeds it explicitly).
+//! * [`XoroshiroRandomSource`]: the Xoroshiro128++ generator used by world generation, with
+//!   [`support`] (`RandomSupport` seeding: Stafford mix, 128-bit upgrade, MD5 `seedFromHashOf`).
 //!
-//! Two pieces are intentionally absent for now: Xoroshiro128++ (the `RandomSource` used since
-//! 1.18), which needs the Minecraft jar to validate its specific seeding, and `nextGaussian`,
-//! which needs the fdlibm `log` port.
+//! All draw methods follow the game's exact semantics (`nextInt(bound)` rejection loops,
+//! `nextFloat`/`nextDouble` bit layouts, `triangle`, `consumeCount`, `fork`, positional
+//! factories). `nextGaussian` is the Marsaglia polar method; the game calls `Math.log` for it,
+//! which on HotSpot/x86_64 is *not* `StrictMath.log` (see [`ms_numerics::hotspot`] for the
+//! platform notes), while `java.util.Random` uses `StrictMath.log` (fdlibm,
+//! [`ms_numerics::fdlibm::log`]).
+//!
+//! Every generator is validated against sequences recorded from the real classes; see
+//! `crates/ms-rng/testdata/` and `tools/refgen/README.md`.
+//!
+//! Invalid arguments that make the Java methods throw (`nextInt(bound <= 0)`,
+//! `nextInt(origin >= bound)`) panic here.
 
 #![forbid(unsafe_code)]
+
+mod gaussian;
+mod legacy;
+pub mod support;
+mod xoroshiro;
+
+pub use gaussian::MarsagliaPolarGaussian;
+pub use legacy::{LegacyPositionalRandomFactory, LegacyRandomSource, SingleThreadedRandomSource};
+pub use xoroshiro::{
+    Xoroshiro128PlusPlus, XoroshiroPositionalRandomFactory, XoroshiroRandomSource,
+};
+
+use ms_numerics::fdlibm;
 
 const MULTIPLIER: u64 = 0x5_DEEC_E66D;
 const INCREMENT: u64 = 0xB;
 const MASK: u64 = (1 << 48) - 1;
-const DOUBLE_UNIT: f64 = 1.0 / (1u64 << 53) as f64;
 
+/// `BitRandomSource.DOUBLE_MULTIPLIER` as the game's bytecode uses it: the double 2^-53 (the
+/// float literal `1.110223E-16F` widened).
+pub(crate) const DOUBLE_UNIT: f64 = 1.110_223_024_625_156_5e-16;
+/// `BitRandomSource.FLOAT_MULTIPLIER`: the float 2^-24.
+pub(crate) const FLOAT_UNIT: f32 = 5.960_464_5e-8;
+
+/// `net.minecraft.util.RandomSource`: the draw methods every game generator implements, with the
+/// interface's default methods.
+pub trait RandomSource {
+    /// `setSeed(long)`; also discards a cached gaussian.
+    fn set_seed(&mut self, seed: i64);
+    /// `nextInt()`.
+    fn next_int(&mut self) -> i32;
+    /// `nextInt(bound)`; panics when `bound <= 0` (Java throws).
+    fn next_int_bound(&mut self, bound: i32) -> i32;
+    /// `nextLong()`.
+    fn next_long(&mut self) -> i64;
+    /// `nextBoolean()`.
+    fn next_boolean(&mut self) -> bool;
+    /// `nextFloat()`: a multiple of 2^-24 in `[0, 1)`.
+    fn next_float(&mut self) -> f32;
+    /// `nextDouble()`: a multiple of 2^-53 in `[0, 1)`.
+    fn next_double(&mut self) -> f64;
+    /// `nextGaussian()`: the polar method with the game's `Math.log`.
+    fn next_gaussian(&mut self) -> f64;
+
+    /// `nextIntBetweenInclusive(min, max)` = `nextInt(max - min + 1) + min`.
+    fn next_int_between_inclusive(&mut self, min: i32, max: i32) -> i32 {
+        self.next_int_bound(max.wrapping_sub(min).wrapping_add(1))
+            .wrapping_add(min)
+    }
+
+    /// `nextInt(origin, bound)` = `origin + nextInt(bound - origin)`; panics unless
+    /// `origin < bound`.
+    fn next_int_range(&mut self, origin: i32, bound: i32) -> i32 {
+        assert!(origin < bound, "bound - origin is non positive");
+        origin.wrapping_add(self.next_int_bound(bound.wrapping_sub(origin)))
+    }
+
+    /// `triangle(double mode, double deviation)` = `mode + deviation * (nextDouble() - nextDouble())`.
+    fn triangle(&mut self, mode: f64, deviation: f64) -> f64 {
+        let a = self.next_double();
+        let b = self.next_double();
+        mode + deviation * (a - b)
+    }
+
+    /// `triangle(float mode, float deviation)`.
+    fn triangle_f32(&mut self, mode: f32, deviation: f32) -> f32 {
+        let a = self.next_float();
+        let b = self.next_float();
+        mode + deviation * (a - b)
+    }
+
+    /// `consumeCount(count)`: draws and discards `count` values (`nextInt()` each; the
+    /// Xoroshiro source advances its generator directly).
+    fn consume_count(&mut self, count: i32) {
+        for _ in 0..count {
+            self.next_int();
+        }
+    }
+}
+
+/// `java.util.Random`.
+#[derive(Clone, Debug)]
 pub struct JavaRandom {
     seed: u64,
+    gaussian: MarsagliaPolarGaussian,
 }
 
 impl JavaRandom {
     pub fn new(seed: i64) -> Self {
         Self {
             seed: (seed as u64 ^ MULTIPLIER) & MASK,
+            gaussian: MarsagliaPolarGaussian::new(),
         }
     }
 
+    /// `setSeed`: also discards a cached gaussian.
     pub fn set_seed(&mut self, seed: i64) {
         self.seed = (seed as u64 ^ MULTIPLIER) & MASK;
+        self.gaussian.reset();
     }
 
     fn next(&mut self, bits: u32) -> i32 {
@@ -74,40 +167,13 @@ impl JavaRandom {
         let lo = i64::from(self.next(27));
         ((hi << 27) + lo) as f64 * DOUBLE_UNIT
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matches_jvm_sequences() {
-        let csv = include_str!("../testdata/java_random.csv");
-        let mut rng = JavaRandom::new(0);
-        let mut current: Option<i64> = None;
-
-        for line in csv.lines().skip(1) {
-            let mut cols = line.split(',');
-            let seed: i64 = cols.next().unwrap().parse().unwrap();
-            let op = cols.next().unwrap();
-            let arg: i32 = cols.next().unwrap().parse().unwrap();
-            let want: u64 = cols.next().unwrap().parse().unwrap();
-
-            if current != Some(seed) {
-                rng = JavaRandom::new(seed);
-                current = Some(seed);
-            }
-
-            let got = match op {
-                "int" => u64::from(rng.next_int() as u32),
-                "intb" => u64::from(rng.next_int_bound(arg) as u32),
-                "long" => rng.next_long() as u64,
-                "float" => u64::from(rng.next_float().to_bits()),
-                "double" => rng.next_double().to_bits(),
-                "bool" => u64::from(rng.next_bool()),
-                other => panic!("unknown op {other}"),
-            };
-            assert_eq!(got, want, "seed={seed} op={op} arg={arg}");
-        }
+    /// `Random.nextGaussian()`: the polar method with `StrictMath.log` / `StrictMath.sqrt`
+    /// (fdlibm), so it is exact on every platform.
+    pub fn next_gaussian(&mut self) -> f64 {
+        let mut gaussian = self.gaussian;
+        let value = gaussian.next_gaussian(|| self.next_double(), fdlibm::log);
+        self.gaussian = gaussian;
+        value
     }
 }
