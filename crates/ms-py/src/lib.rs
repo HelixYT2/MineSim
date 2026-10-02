@@ -6,8 +6,7 @@
 // reports as a useless conversion in code we don't author. Allow it for this binding shim only.
 #![allow(clippy::useless_conversion)]
 
-use ms_arena::{Action, Arena, BatchArena, Player};
-use ms_kernel::player::Keys;
+use ms_arena::{Action, Arena, BatchArena};
 use ms_numerics::Vec3;
 use ms_world::World;
 use numpy::ndarray::Array2;
@@ -72,16 +71,15 @@ impl PyArena {
         yaw: f32,
     ) {
         self.inner.step(&Action {
-            keys: Keys {
-                forward,
-                back,
-                left,
-                right,
-            },
+            forward,
+            back,
+            left,
+            right,
             jump,
-            sprinting: sprint,
-            sneaking: sneak,
+            shift: sneak,
+            sprint,
             yaw,
+            pitch: 0.0,
         });
     }
 
@@ -129,15 +127,17 @@ impl PyArena {
         )
     }
 
-    /// Restore a state previously returned by [`get_state`].
+    /// Restore a state previously returned by [`get_state`]: the position, velocity, yaw, ground
+    /// flag and jump cooldown it carries are written into the current player state (the bindings
+    /// are due to expose the full state later).
     fn set_state(&mut self, state: State) {
-        self.inner.set_state(Player {
-            pos: Vec3::new(state.0, state.1, state.2),
-            vel: Vec3::new(state.3, state.4, state.5),
-            yaw: state.6,
-            on_ground: state.7,
-            no_jump_delay: state.8,
-        });
+        let mut p = self.inner.get_state();
+        p.pos = Vec3::new(state.0, state.1, state.2);
+        p.vel = Vec3::new(state.3, state.4, state.5);
+        p.yaw = state.6;
+        p.on_ground = state.7;
+        p.no_jump_delay = state.8;
+        self.inner.set_state(p);
     }
 }
 
@@ -202,16 +202,15 @@ impl PyBatch {
         }
         let acts: Vec<Action> = (0..n)
             .map(|i| Action {
-                keys: Keys {
-                    forward: a[[i, 0]] != 0.0,
-                    back: a[[i, 1]] != 0.0,
-                    left: a[[i, 2]] != 0.0,
-                    right: a[[i, 3]] != 0.0,
-                },
+                forward: a[[i, 0]] != 0.0,
+                back: a[[i, 1]] != 0.0,
+                left: a[[i, 2]] != 0.0,
+                right: a[[i, 3]] != 0.0,
                 jump: a[[i, 4]] != 0.0,
-                sprinting: a[[i, 5]] != 0.0,
-                sneaking: a[[i, 6]] != 0.0,
+                sprint: a[[i, 5]] != 0.0,
+                shift: a[[i, 6]] != 0.0,
                 yaw: a[[i, 7]] as f32,
+                pitch: 0.0,
             })
             .collect();
         py.allow_threads(|| self.inner.step(&acts));

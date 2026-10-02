@@ -1,9 +1,10 @@
-//! The embeddable simulation: an [`Arena`] owns a world and a player, advances it one tick at a
-//! time from an [`Action`], and exposes state for snapshotting and hashing. Scope today is
-//! grounded movement on inert terrain (the validated kernel); fluids, entities, and the batched
-//! parallel API build on top of this.
+//! The embeddable simulation: an [`Arena`] owns a world and a player, advances it one client tick at
+//! a time from an [`Action`] (the keys and look direction of that tick), and exposes the state for
+//! snapshotting and hashing. The physics is the kernel's [`ms_kernel::player::tick`]: sprinting,
+//! crouching and the rest of the player rules are derived from the keys exactly as the game does,
+//! so an action is what a human at the keyboard controls and nothing more.
 
-use ms_kernel::player::{self, Keys};
+use ms_kernel::player;
 use ms_numerics::Vec3;
 use ms_oracle::StateBuf;
 use ms_world::World;
@@ -11,26 +12,13 @@ use ms_world::World;
 mod batch;
 pub use batch::BatchArena;
 
-/// The player's simulated state.
-#[derive(Clone, Copy, Debug)]
-pub struct Player {
-    pub pos: Vec3,
-    pub vel: Vec3,
-    pub yaw: f32,
-    pub on_ground: bool,
-    pub no_jump_delay: i32,
-}
+pub use ms_kernel::{Input, PlayerState, Pose};
 
-/// One tick of agent input. `sprinting`/`sneaking` are exposed as direct boolean actions rather
-/// than derived from a key + conditions, which suits a reinforcement-learning action space.
-#[derive(Clone, Copy, Debug)]
-pub struct Action {
-    pub keys: Keys,
-    pub jump: bool,
-    pub sprinting: bool,
-    pub sneaking: bool,
-    pub yaw: f32,
-}
+/// One tick of agent input: the seven movement keys and the absolute look direction.
+pub type Action = Input;
+
+/// The player's simulated state (everything the kernel keeps across ticks).
+pub type Player = PlayerState;
 
 pub struct Arena {
     world: World,
@@ -42,50 +30,27 @@ impl Arena {
     pub fn new(world: World, pos: Vec3, yaw: f32) -> Self {
         Self {
             world,
-            player: Player {
-                pos,
-                vel: Vec3::ZERO,
-                yaw,
-                on_ground: false,
-                no_jump_delay: 0,
-            },
+            player: PlayerState::new(pos, yaw),
         }
     }
 
-    /// Reset the player to a position/orientation, at rest.
+    /// Reset the player to a position/orientation, at rest (full health and food, no effects).
     pub fn reset(&mut self, pos: Vec3, yaw: f32) {
-        self.player = Player {
-            pos,
-            vel: Vec3::ZERO,
-            yaw,
-            on_ground: false,
-            no_jump_delay: 0,
-        };
+        self.player = PlayerState::new(pos, yaw);
+    }
+
+    pub fn world(&self) -> &World {
+        &self.world
     }
 
     /// Advance one tick.
     pub fn step(&mut self, action: &Action) {
-        self.player.yaw = action.yaw;
-        let (pos, vel, on_ground) = player::step(
-            self.player.pos,
-            self.player.vel,
-            action.yaw,
-            self.player.on_ground,
-            action.sprinting,
-            action.sneaking,
-            action.keys,
-            action.jump,
-            &mut self.player.no_jump_delay,
-            &self.world,
-        );
-        self.player.pos = pos;
-        self.player.vel = vel;
-        self.player.on_ground = on_ground;
+        player::tick(&mut self.player, action, &self.world);
     }
 
     /// Snapshot the player state (for checkpoint/restore).
     pub fn get_state(&self) -> Player {
-        self.player
+        self.player.clone()
     }
 
     /// Restore a previously snapshotted player state.
@@ -93,9 +58,20 @@ impl Arena {
         self.player = player;
     }
 
-    /// The canonical per-tick state hash (`docs/contract.md`).
+    /// The canonical per-tick state hash (`docs/contract.md`). The fields, in serialization
+    /// order: position (3 x f64), velocity (3 x f64), fall distance (f64); yaw, pitch, `xxa`,
+    /// `yya`, `zza` (f32); the flags on ground, horizontal collision, vertical collision, sprinting,
+    /// swimming, in water, in lava and no-physics (one byte each); the integers no-jump delay, tick
+    /// count and food level (i32), and the pose ordinal (u32).
     pub fn state_hash(&self) -> u64 {
         let p = &self.player;
+        let pose = match p.pose {
+            Pose::Standing => 0_u32,
+            Pose::Crouching => 1,
+            Pose::Swimming => 2,
+            Pose::FallFlying => 3,
+            Pose::Dying => 4,
+        };
         let mut buf = StateBuf::new();
         buf.push_f64(p.pos.x)
             .push_f64(p.pos.y)
@@ -103,8 +79,24 @@ impl Arena {
             .push_f64(p.vel.x)
             .push_f64(p.vel.y)
             .push_f64(p.vel.z)
+            .push_f64(p.fall_distance)
             .push_f32(p.yaw)
-            .push_bool(p.on_ground);
+            .push_f32(p.pitch)
+            .push_f32(p.xxa)
+            .push_f32(0.0) // yya: always zero for the player
+            .push_f32(p.zza)
+            .push_bool(p.on_ground)
+            .push_bool(p.horizontal_collision)
+            .push_bool(p.vertical_collision)
+            .push_bool(p.sprinting)
+            .push_bool(p.swimming)
+            .push_bool(p.in_water)
+            .push_bool(p.in_lava)
+            .push_bool(false) // noPhysics
+            .push_i32(p.no_jump_delay)
+            .push_i32(p.tick_count)
+            .push_i32(p.food)
+            .push_u32(pose);
         buf.hash()
     }
 }

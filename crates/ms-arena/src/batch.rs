@@ -85,22 +85,16 @@ impl BatchArena {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ms_kernel::player::Keys;
     use ms_numerics::Vec3;
     use ms_world::World;
 
     fn sprint_forward(yaw: f32) -> Action {
         Action {
-            keys: Keys {
-                forward: true,
-                back: false,
-                left: false,
-                right: false,
-            },
+            forward: true,
             jump: true,
-            sprinting: true,
-            sneaking: false,
+            sprint: true,
             yaw,
+            ..Action::default()
         }
     }
 

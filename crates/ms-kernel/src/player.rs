@@ -1,343 +1,427 @@
-//! Player input -> motion for grounded, non-fluid movement.
+//! One client tick of the local player: [`tick`] reproduces what the game does to a `LocalPlayer`
+//! between two client ticks, driven by that tick's keys and look direction.
 //!
-//! Ports the client input chain (`KeyboardInput.tick` -> `LocalPlayer.modifyInput`) and the
-//! flat-ground case of `LivingEntity.aiStep`/`travelInAir`: velocity rounding, friction-scaled
-//! input rotated by yaw, then the per-axis drag and gravity. Full collision lives in
-//! [`crate::collision`]; here the terrain is assumed flat and unobstructed (the entity rests on
-//! the ground, so the vertical movement collapses to the fall-on Y reset).
+//! The chain, in the order the game runs it:
+//!
+//! 1. `ClientLevel.tickNonPassenger`: the old position is remembered, `tickCount` increments.
+//! 2. `Player.tick` -> `LivingEntity.tick` -> `Entity.tick`/`baseTick`: fluid state, fire, effect and
+//!    timer countdowns ([`crate::living::base_tick`]).
+//! 3. `LocalPlayer.aiStep`: the crouching decision, the keyboard input, pushing out of walls,
+//!    sprint start/stop rules ([`local_player_ai_step`]), then `Player.aiStep` and
+//!    `LivingEntity.aiStep` ([`crate::living::ai_step`]): velocity rounding, jump, travel,
+//!    `Entity.move` ([`crate::entity::move_entity`]) and the effects of the blocks passed through.
+//! 4. Back in `Player.tick`: the position clamp and `updatePlayerPose`.
+//!
+//! What the server does to the player between ticks (knockback, effects, health, teleports) is not
+//! part of this; it arrives as changes to the [`PlayerState`] before the next call.
+//!
+//! Not simulated (the corresponding state stays inert): riding, elytra flight, sleeping, using
+//! items, auto-jump, spectator mode and creative flight toggling.
 
-use ms_numerics::{mth, Vec3};
-use ms_world::aabb::Aabb;
+// The comparisons mirror the reference's `!(a <= b)` forms, which differ from `a > b` for NaN.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
+use crate::attributes::{Attribute, Modifier, Operation};
+use crate::collision::{self, aabb, aabb_deflate, bounding_box_at, floor, jmin};
+use crate::input::{has_forward_impulse, keyboard_move_vector};
+use crate::living::{
+    ai_step, base_tick, go_down_in_water, is_affected_by_fluids, is_in_shallow_water,
+    is_moving_slowly, is_swimming, is_under_water,
+};
+use crate::state::{Input, PlayerState, Pose};
+use ms_numerics::Vec3;
 use ms_world::World;
 
-const DEG_TO_RAD: f32 = (std::f64::consts::PI / 180.0) as f32;
-const HALF_WIDTH: f64 = (0.6_f32 / 2.0_f32) as f64;
-const HEIGHT: f64 = 1.8_f32 as f64;
-const JUMP_POWER: f64 = 0.42_f32 as f64;
-const STEP_HEIGHT: f32 = 0.6;
+/// `Options.sprintWindow`'s default: how many ticks a first forward tap stays armed.
+const SPRINT_WINDOW: i32 = 7;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Keys {
-    pub forward: bool,
-    pub back: bool,
-    pub left: bool,
-    pub right: bool,
-}
-
-fn impulse(a: bool, b: bool) -> f32 {
-    if a == b {
-        0.0
-    } else if a {
-        1.0
+/// Dimensions of `pose` for this player (`Player.getDimensions(pose)`, scale included).
+fn dimensions_for(p: &PlayerState, pose: Pose) -> (f32, f32) {
+    let (w, h) = pose.dimensions();
+    let scale = p.attributes.value(Attribute::Scale) as f32;
+    if scale == 1.0 {
+        (w, h)
     } else {
-        -1.0
+        (w * scale, h * scale)
     }
 }
 
-fn mth_sqrt(x: f32) -> f32 {
-    f64::from(x).sqrt() as f32
+/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen`: whether the box of `pose` at the current
+/// position (shrunk by 1e-7) is free of blocks.
+pub fn can_fit_in_pose(p: &PlayerState, world: &World, pose: Pose) -> bool {
+    let bb = aabb_deflate(bounding_box_at(p.pos, dimensions_for(p, pose)), 1.0E-7);
+    collision::no_collision(world, p, bb)
 }
 
-/// `KeyboardInput.tick` + `LocalPlayer.modifyInput`: keys -> `(xxa, zza)` movement input.
-fn movement_input(keys: Keys, sneaking: bool) -> (f32, f32) {
-    let forward = impulse(keys.forward, keys.back);
-    let strafe = impulse(keys.left, keys.right);
-    // Vec2(strafe, forward).normalized()
-    let len = mth_sqrt(strafe * strafe + forward * forward);
-    if len < 1.0e-4 {
-        return (0.0, 0.0);
+/// `LivingEntity.setSprinting` as seen by the movement-speed attribute: the flag, and the
+/// "sprinting" modifier (+30% total) added or removed. The effects module owns this
+/// ([`crate::effects::set_sprinting`], called first); re-establishing the modifier afterwards is
+/// idempotent and keeps the physics right while that hook is a stub.
+pub fn set_sprinting(p: &mut PlayerState, sprinting: bool) {
+    crate::effects::set_sprinting(p, sprinting);
+    p.attributes
+        .remove_modifier(Attribute::MovementSpeed, "minecraft:sprinting");
+    if sprinting {
+        p.attributes.add_modifier(
+            Attribute::MovementSpeed,
+            Modifier {
+                id: "minecraft:sprinting".to_string(),
+                amount: f64::from(0.3_f32),
+                operation: Operation::AddMultipliedTotal,
+            },
+        );
     }
-    let mut x = strafe / len;
-    let mut y = forward / len;
-    // modifyInput: scale 0.98, sneaking factor, then the square-movement correction.
-    x *= 0.98;
-    y *= 0.98;
-    if sneaking {
-        x *= 0.3;
-        y *= 0.3;
-    }
-    square_movement(x, y)
 }
 
-/// `LocalPlayer.modifyInputSpeedForSquareMovement`: lets diagonal input reach the same speed as
-/// the edge of the unit square.
-fn square_movement(x: f32, y: f32) -> (f32, f32) {
-    let len = mth_sqrt(x * x + y * y);
-    if len <= 0.0 {
-        return (x, y);
-    }
-    // Vec2.scale(1.0F / f): reciprocal first, then multiply — not a direct divide (they differ
-    // by a ULP in float, which compounds through the rotation).
-    let inv = 1.0 / len;
-    let ux = x * inv;
-    let uy = y * inv;
-    let fa = ux.abs();
-    let ga = uy.abs();
-    let ratio = if ga > fa { fa / ga } else { ga / fa };
-    let dist = mth_sqrt(1.0 + ratio * ratio);
-    let h = (len * dist).min(1.0);
-    (ux * h, uy * h)
+/// `LocalPlayer.isSprintingPossible`: not blinded, enough food (more than 6), and not in shallow
+/// water unless `allow_shallow`.
+fn is_sprinting_possible(p: &PlayerState, allow_shallow: bool) -> bool {
+    !p.effects.has("minecraft:blindness")
+        && p.food > 6
+        && (allow_shallow || !is_in_shallow_water(p))
 }
 
-/// `Entity.getInputVector`: scale the input by `speed` and rotate it around Y by `yaw`.
-fn input_vector(xxa: f64, zza: f64, speed: f32, yaw: f32) -> Vec3 {
-    let lensq = xxa * xxa + zza * zza;
-    if lensq < 1.0e-7 {
-        return Vec3::ZERO;
-    }
-    let scale = f64::from(speed);
-    let (sx, sz) = if lensq > 1.0 {
-        let l = lensq.sqrt();
-        (xxa / l * scale, zza / l * scale)
-    } else {
-        (xxa * scale, zza * scale)
-    };
-    let sin = f64::from(mth::sin(yaw * DEG_TO_RAD));
-    let cos = f64::from(mth::cos(yaw * DEG_TO_RAD));
-    Vec3::new(sx * cos - sz * sin, 0.0, sz * cos + sx * sin)
+/// `LocalPlayer.canStartSprinting`.
+fn can_start_sprinting(p: &PlayerState, forward_impulse: bool) -> bool {
+    !p.sprinting
+        && forward_impulse
+        && is_sprinting_possible(p, p.flying)
+        && (!is_moving_slowly(p) || is_under_water(p))
 }
 
-/// `getSpeed()` = the MOVEMENT_SPEED attribute: base `0.1f` (stored as a float, so
-/// `(double)0.1f`), +30% (multiplied total) while sprinting.
-fn movement_speed(sprinting: bool) -> f32 {
-    let base = f64::from(0.1_f32);
-    let factor = if sprinting {
-        1.0 + f64::from(0.3_f32)
-    } else {
-        1.0
-    };
-    (base * factor) as f32
+/// `LocalPlayer.shouldStopRunSprinting`.
+fn should_stop_run_sprinting(p: &PlayerState, forward_impulse: bool) -> bool {
+    !is_sprinting_possible(p, p.flying)
+        || !forward_impulse
+        || (p.horizontal_collision && !p.minor_horizontal_collision)
 }
 
-/// One tick of grounded, unobstructed movement: predicts the next `deltaMovement`. Mirrors the
-/// velocity rounding in `LivingEntity.aiStep` followed by `travelInAir`.
-pub fn next_velocity(
-    vel: Vec3,
-    yaw: f32,
-    on_ground: bool,
-    sprinting: bool,
-    sneaking: bool,
-    keys: Keys,
-) -> Vec3 {
-    let mut vx = vel.x;
-    let mut vy = vel.y;
-    let mut vz = vel.z;
-    if vx * vx + vz * vz < 9.0e-6 {
-        vx = 0.0;
-        vz = 0.0;
-    }
-    if vy.abs() < 0.003 {
-        vy = 0.0;
-    }
-
-    let (xxa, zza) = movement_input(keys, sneaking);
-    let friction: f32 = if on_ground { 0.6 } else { 1.0 };
-    let drag = f64::from(friction * 0.91);
-    let speed = if on_ground {
-        movement_speed(sprinting) * (0.216_000_02 / (friction * friction * friction))
-    } else {
-        0.02
-    };
-    let input = input_vector(f64::from(xxa), f64::from(zza), speed, yaw);
-
-    let mx = vx + input.x;
-    let mz = vz + input.z;
-    let post_y = if on_ground { 0.0 } else { vy };
-    let d = post_y - 0.08;
-    Vec3::new(mx * drag, d * f64::from(0.98_f32), mz * drag)
+/// `LocalPlayer.shouldStopSwimSprinting`.
+fn should_stop_swim_sprinting(p: &PlayerState, forward_impulse: bool, shift: bool) -> bool {
+    !is_sprinting_possible(p, true) || !p.in_water || (!forward_impulse && !p.on_ground && !shift)
 }
 
-/// The player's standing bounding box at a position (`EntityDimensions.makeBoundingBox`).
-pub fn player_bb(pos: Vec3) -> Aabb {
-    Aabb::new(
-        Vec3::new(pos.x - HALF_WIDTH, pos.y, pos.z - HALF_WIDTH),
-        Vec3::new(pos.x + HALF_WIDTH, pos.y + HEIGHT, pos.z + HALF_WIDTH),
-    )
+/// `LocalPlayer.suffocatesAt`: does a suffocating block overlap the player's height within the
+/// column of block `(x, z)`?
+fn suffocates_at(p: &PlayerState, world: &World, x: i32, z: i32) -> bool {
+    let bb = collision::bounding_box(p);
+    let col = aabb(
+        f64::from(x),
+        bb.min.y,
+        f64::from(z),
+        f64::from(x) + 1.0,
+        bb.max.y,
+        f64::from(z) + 1.0,
+    );
+    collision::collides_with_suffocating_block(world, p, aabb_deflate(col, 1.0E-7))
 }
 
-fn mth_equal(a: f64, b: f64) -> bool {
-    (b - a).abs() < f64::from(1.0e-5_f32)
-}
-
-fn gather_in(world: &World, region: Aabb) -> Vec<Aabb> {
-    let x0 = region.min.x.floor() as i32;
-    let x1 = region.max.x.floor() as i32;
-    let y0 = region.min.y.floor() as i32;
-    let y1 = region.max.y.floor() as i32;
-    let z0 = region.min.z.floor() as i32;
-    let z1 = region.max.z.floor() as i32;
-    let mut out = Vec::new();
-    for bx in x0..=x1 {
-        for by in y0..=y1 {
-            for bz in z0..=z1 {
-                for s in ms_data::collision_boxes(world.block_state(bx, by, bz)) {
-                    out.push(Aabb::new(
-                        Vec3::new(
-                            f64::from(bx) + s[0],
-                            f64::from(by) + s[1],
-                            f64::from(bz) + s[2],
-                        ),
-                        Vec3::new(
-                            f64::from(bx) + s[3],
-                            f64::from(by) + s[4],
-                            f64::from(bz) + s[5],
-                        ),
-                    ));
-                }
+/// `LocalPlayer.moveTowardsClosestSpace(x, z)`: if the point is inside a suffocating block, nudge
+/// the velocity towards the nearest side that is free.
+fn move_towards_closest_space(p: &mut PlayerState, world: &World, x: f64, z: f64) {
+    let bx = floor(x);
+    let bz = floor(z);
+    if suffocates_at(p, world, bx, bz) {
+        let f = x - f64::from(bx);
+        let g = z - f64::from(bz);
+        // (dx, dz, step) for WEST, EAST, NORTH, SOUTH; `i` is the choose() of the axis.
+        let candidates: [(i32, i32, bool, f64); 4] = [
+            (-1, 0, false, f),
+            (1, 0, true, f),
+            (0, -1, false, g),
+            (0, 1, true, g),
+        ];
+        let mut best: Option<(i32, i32)> = None;
+        let mut h = f64::MAX;
+        for (dx, dz, positive, i) in candidates {
+            let j = if positive { 1.0 - i } else { i };
+            if j < h && !suffocates_at(p, world, bx + dx, bz + dz) {
+                h = j;
+                best = Some((dx, dz));
+            }
+        }
+        if let Some((dx, dz)) = best {
+            let v = p.vel;
+            if dx != 0 {
+                crate::entity::set_vel(p, Vec3::new(0.1 * f64::from(dx), v.y, v.z));
+            } else {
+                crate::entity::set_vel(p, Vec3::new(v.x, v.y, 0.1 * f64::from(dz)));
             }
         }
     }
-    out
 }
 
-/// `Entity.move` for the player: collide the motion (with step-up) against the world, advance the
-/// position, and apply the collision rules to the velocity — zero a horizontal component on
-/// contact (`Mth.equal` test), zero Y on a vertical hit (default `updateEntityMovementAfterFallOn`).
-fn move_entity(pos: Vec3, mut vel: Vec3, on_ground: bool, world: &World) -> (Vec3, Vec3, bool) {
-    let bb = player_bb(pos);
-    let motion = vel;
-    let region =
-        bb.expand_towards(motion)
-            .expand_towards(Vec3::new(0.0, f64::from(STEP_HEIGHT), 0.0));
-    let colliders = gather_in(world, region);
-    let moved = crate::collision::collide(motion, bb, on_ground, STEP_HEIGHT, &colliders);
-    let new_pos = Vec3::new(pos.x + moved.x, pos.y + moved.y, pos.z + moved.z);
-    if !mth_equal(motion.x, moved.x) {
-        vel.x = 0.0;
-    }
-    if !mth_equal(motion.z, moved.z) {
-        vel.z = 0.0;
-    }
-    let vertical_collision = motion.y != moved.y;
-    if vertical_collision {
-        vel.y = 0.0;
-    }
-    (new_pos, vel, vertical_collision && motion.y < 0.0)
-}
-
-fn block_below_friction(world: &World, pos: Vec3, on_ground: bool) -> f32 {
-    if !on_ground {
-        return 1.0;
-    }
-    let bx = pos.x.floor() as i32;
-    let by = (pos.y - 0.5).floor() as i32;
-    let bz = pos.z.floor() as i32;
-    ms_data::block_friction(world.block(bx, by, bz))
-}
-
-/// One full grounded tick over a real world: velocity rounding, input, jump, then `travelInAir`
-/// with real block collision. `no_jump_delay` carries the 10-tick jump cooldown across ticks.
-#[allow(clippy::too_many_arguments)]
-pub fn step(
-    pos: Vec3,
-    vel: Vec3,
-    yaw: f32,
-    on_ground: bool,
-    sprinting: bool,
-    sneaking: bool,
-    keys: Keys,
-    jump: bool,
-    no_jump_delay: &mut i32,
-    world: &World,
-) -> (Vec3, Vec3, bool) {
-    if *no_jump_delay > 0 {
-        *no_jump_delay -= 1;
+/// `LocalPlayer.aiStep` followed by `Player.aiStep`'s own part and `LivingEntity.aiStep`.
+fn local_player_ai_step(p: &mut PlayerState, world: &World, input: &Input, old_pos: Vec3) {
+    if p.sprint_trigger_time > 0 {
+        p.sprint_trigger_time -= 1;
     }
 
-    let mut v = vel;
-    if v.x * v.x + v.z * v.z < 9.0e-6 {
-        v.x = 0.0;
-        v.z = 0.0;
-    }
-    if v.y.abs() < 0.003 {
-        v.y = 0.0;
+    // These read the previous tick's key state, before the keyboard input is refreshed.
+    let was_shift = p.shift_key_down;
+    // hasForwardImpulse() of the previous tick's move vector: its forward component is positive
+    // exactly when `zza` (a positive multiple of it) is.
+    let had_forward_impulse = p.zza > 0.0;
+
+    p.crouching = !p.flying
+        && !is_swimming(p)
+        && can_fit_in_pose(p, world, Pose::Crouching)
+        && (p.shift_key_down || !can_fit_in_pose(p, world, Pose::Standing));
+
+    // input.tick()
+    let move_vector = keyboard_move_vector(input);
+    p.shift_key_down = input.shift;
+    let forward_impulse = has_forward_impulse(move_vector);
+
+    // if (!noPhysics) moveTowardsClosestSpace at the four corners of the box (0.35 of the width)
+    let width = f64::from(p.dimensions().0);
+    let (px, pz) = (p.pos.x, p.pos.z);
+    move_towards_closest_space(p, world, px - width * 0.35, pz + width * 0.35);
+    let (px, pz) = (p.pos.x, p.pos.z);
+    move_towards_closest_space(p, world, px - width * 0.35, pz - width * 0.35);
+    let (px, pz) = (p.pos.x, p.pos.z);
+    move_towards_closest_space(p, world, px + width * 0.35, pz - width * 0.35);
+    let (px, pz) = (p.pos.x, p.pos.z);
+    move_towards_closest_space(p, world, px + width * 0.35, pz + width * 0.35);
+
+    if was_shift || input.back {
+        p.sprint_trigger_time = 0;
     }
 
-    let (xxa, zza) = movement_input(keys, sneaking);
-
-    if jump {
-        if on_ground && *no_jump_delay == 0 {
-            if v.y < JUMP_POWER {
-                v.y = JUMP_POWER;
+    if can_start_sprinting(p, forward_impulse) {
+        if !had_forward_impulse {
+            if p.sprint_trigger_time > 0 {
+                set_sprinting(p, true);
+            } else {
+                p.sprint_trigger_time = SPRINT_WINDOW;
             }
-            if sprinting {
-                let g = yaw * DEG_TO_RAD;
-                v.x += -f64::from(mth::sin(g)) * 0.2;
-                v.z += f64::from(mth::cos(g)) * 0.2;
-            }
-            *no_jump_delay = 10;
         }
-    } else {
-        *no_jump_delay = 0;
+        if input.sprint {
+            set_sprinting(p, true);
+        }
     }
 
-    let friction = block_below_friction(world, pos, on_ground);
-    let drag = f64::from(friction * 0.91);
-    let speed = if on_ground {
-        movement_speed(sprinting) * (0.216_000_02 / (friction * friction * friction))
-    } else if sprinting {
-        0.025_999_999
-    } else {
-        0.02
-    };
-    let input = input_vector(f64::from(xxa), f64::from(zza), speed, yaw);
-    v.x += input.x;
-    v.z += input.z;
+    if p.sprinting {
+        if is_swimming(p) {
+            if should_stop_swim_sprinting(p, forward_impulse, input.shift) {
+                set_sprinting(p, false);
+            }
+        } else if should_stop_run_sprinting(p, forward_impulse) {
+            set_sprinting(p, false);
+        }
+    }
 
-    let (new_pos, post, new_on_ground) = move_entity(pos, v, on_ground, world);
-    let d = post.y - 0.08;
-    let new_vel = Vec3::new(post.x * drag, d * f64::from(0.98_f32), post.z * drag);
-    (new_pos, new_vel, new_on_ground)
+    if p.in_water && input.shift && is_affected_by_fluids(p) {
+        go_down_in_water(p);
+    }
+
+    if p.flying {
+        // Creative flight: vertical control with jump and sneak (3 x the flying speed).
+        let mut i = 0_i32;
+        if input.shift {
+            i -= 1;
+        }
+        if input.jump {
+            i += 1;
+        }
+        if i != 0 {
+            let v = p.vel;
+            let dy = f64::from(i as f32 * 0.05_f32 * 3.0_f32);
+            crate::entity::set_vel(p, Vec3::new(v.x + 0.0, v.y + dy, v.z + 0.0));
+        }
+    }
+
+    // Player.aiStep
+    if p.jump_trigger_time > 0 {
+        p.jump_trigger_time -= 1;
+    }
+    if p.flying {
+        crate::entity::reset_fall_distance(p);
+    }
+    ai_step(p, world, input, move_vector, old_pos);
+    p.speed = crate::living::speed(p);
+
+    // LocalPlayer: landing ends creative flight.
+    if p.on_ground && p.flying {
+        p.flying = false;
+    }
+}
+
+/// `Player.getDesiredPose`.
+fn desired_pose(p: &PlayerState) -> Pose {
+    if is_swimming(p) {
+        Pose::Swimming
+    } else if p.shift_key_down && !p.flying {
+        Pose::Crouching
+    } else {
+        Pose::Standing
+    }
+}
+
+/// `Player.updatePlayerPose`: the pose follows the input, unless the box of the wanted pose does not
+/// fit (then crouching, or swimming/crawling, whichever fits).
+fn update_player_pose(p: &mut PlayerState, world: &World) {
+    if can_fit_in_pose(p, world, Pose::Swimming) {
+        let pose = desired_pose(p);
+        let pose2 = if can_fit_in_pose(p, world, pose) {
+            pose
+        } else if can_fit_in_pose(p, world, Pose::Crouching) {
+            Pose::Crouching
+        } else {
+            Pose::Swimming
+        };
+        p.pose = pose2;
+    }
 }
 
 /// One client tick of the local player: everything the game does to it between the start and the
 /// end of a client tick (`LocalPlayer.tick` and the `Player`/`LivingEntity`/`Entity` chain under
 /// it), driven by `input`. This is the kernel's entry point.
-pub fn tick(p: &mut crate::state::PlayerState, input: &crate::state::Input, world: &World) {
+pub fn tick(p: &mut PlayerState, input: &Input, world: &World) {
+    // ClientLevel.tickNonPassenger: Entity.setOldPosAndRot(), tickCount++.
+    let old_pos = p.pos;
+    p.tick_count = p.tick_count.wrapping_add(1);
+    // The look direction of this tick (mouse movement is applied before the player ticks).
     p.yaw = input.yaw;
     p.pitch = input.pitch;
-    let keys = Keys {
-        forward: input.forward,
-        back: input.back,
-        left: input.left,
-        right: input.right,
-    };
-    let (pos, vel, on_ground) = step(
-        p.pos,
-        p.vel,
-        input.yaw,
-        p.on_ground,
-        p.sprinting || input.sprint,
-        input.shift,
-        keys,
-        input.jump,
-        &mut p.no_jump_delay,
-        world,
-    );
-    p.pos = pos;
-    p.vel = vel;
-    p.on_ground = on_ground;
-    p.tick_count += 1;
+
+    // Player.tick -> LivingEntity.tick -> Entity.tick
+    base_tick(p, world);
+    // LivingEntity.tick -> aiStep (LocalPlayer's override)
+    local_player_ai_step(p, world, input, old_pos);
+
+    // Player.tick: keep the horizontal position within the world border limits...
+    let x = clamp(p.pos.x, -2.999_999_9E7, 2.999_999_9E7);
+    let z = clamp(p.pos.z, -2.999_999_9E7, 2.999_999_9E7);
+    if x != p.pos.x || z != p.pos.z {
+        p.pos = Vec3::new(x, p.pos.y, z);
+    }
+    // ...then the pose for the next tick.
+    update_player_pose(p, world);
+}
+
+/// `Mth.clamp(double, double, double)`.
+fn clamp(d: f64, lo: f64, hi: f64) -> f64 {
+    if d < lo {
+        lo
+    } else {
+        jmin(d, hi)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ms_numerics::Vec3;
 
+    fn stand_on_flat(world_surface: i32) -> (PlayerState, World) {
+        let world = World::flat(world_surface);
+        let mut p = PlayerState::new(Vec3::new(0.5, f64::from(world_surface), 0.5), 0.0);
+        // Settle onto the floor.
+        let idle = Input::default();
+        for _ in 0..3 {
+            tick(&mut p, &idle, &world);
+        }
+        (p, world)
+    }
+
+    #[test]
+    fn standing_player_rests_on_the_floor() {
+        let (p, _) = stand_on_flat(0);
+        assert!(p.on_ground);
+        assert_eq!(p.pos.y, 0.0);
+        assert_eq!(p.vel.y, (0.0 - 0.08) * f64::from(0.98_f32));
+        assert!(p.vertical_collision && p.vertical_collision_below);
+        assert_eq!(p.pose, Pose::Standing);
+    }
+
+    #[test]
+    fn sprint_key_starts_sprinting_and_speeds_up() {
+        let (mut p, world) = stand_on_flat(0);
+        let walk = Input {
+            forward: true,
+            ..Input::default()
+        };
+        let sprint = Input {
+            forward: true,
+            sprint: true,
+            ..Input::default()
+        };
+        let mut a = p.clone();
+        for _ in 0..20 {
+            tick(&mut a, &walk, &world);
+        }
+        for _ in 0..20 {
+            tick(&mut p, &sprint, &world);
+        }
+        assert!(p.sprinting);
+        assert!(!a.sprinting);
+        // z grows in the +z direction for yaw 0; sprinting covers more ground.
+        assert!(p.pos.z > a.pos.z);
+    }
+
+    #[test]
+    fn jumping_leaves_the_ground_and_returns() {
+        let (mut p, world) = stand_on_flat(0);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        tick(&mut p, &jump, &world);
+        assert!(!p.on_ground);
+        assert!(p.pos.y > 0.0);
+        let idle = Input::default();
+        for _ in 0..30 {
+            tick(&mut p, &idle, &world);
+        }
+        assert!(p.on_ground);
+        assert_eq!(p.pos.y, 0.0);
+    }
+
+    #[test]
+    fn sneaking_changes_the_pose_and_does_not_walk_off_the_edge() {
+        // A 1x1 platform floating one block up in an otherwise flat world.
+        let mut grid = ms_world::GridWorld::new(ms_world::FlatWorld::new(0, ms_data::AIR));
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        grid.set_block(0, -1, 0, stone);
+        let world = World::grid(grid);
+        let mut p = PlayerState::new(Vec3::new(0.5, 0.0, 0.5), 0.0);
+        let sneak_forward = Input {
+            forward: true,
+            shift: true,
+            ..Input::default()
+        };
+        for _ in 0..60 {
+            tick(&mut p, &sneak_forward, &world);
+        }
+        assert_eq!(p.pose, Pose::Crouching);
+        assert!(
+            p.on_ground,
+            "the edge back-off must keep the player on the block"
+        );
+        assert!(p.pos.z < 1.0 + 0.3 + 1e-9);
+    }
+
+    #[test]
+    fn tick_count_increments_once_per_tick() {
+        let (mut p, world) = stand_on_flat(0);
+        let before = p.tick_count;
+        tick(&mut p, &Input::default(), &world);
+        assert_eq!(p.tick_count, before + 1);
+    }
+
+    /// A row of `testdata/walk.csv`: the end-of-tick state of a recorded session and the keys held
+    /// during that tick.
     struct Row {
-        y: u64,
-        dx: f64,
-        dy: f64,
-        dz: f64,
-        yaw: f32,
+        pos: Vec3,
+        vel: Vec3,
         on_ground: bool,
         sprinting: bool,
         sneaking: bool,
-        keys: Keys,
-        jump: bool,
+        input: Input,
     }
 
-    fn parse() -> Vec<Row> {
+    fn parse_walk() -> Vec<Row> {
         let csv = include_str!("../testdata/walk.csv");
         let mut rows = Vec::new();
         for line in csv.lines().skip(1) {
@@ -349,91 +433,100 @@ mod tests {
             let fl = |i: usize| f32::from_bits(c[i].parse::<i32>().unwrap() as u32);
             let b = |i: usize| c[i] == "1";
             rows.push(Row {
-                y: c[2].parse::<i64>().unwrap() as u64,
-                dx: d(4),
-                dy: d(5),
-                dz: d(6),
-                yaw: fl(7),
+                pos: Vec3::new(d(1), d(2), d(3)),
+                vel: Vec3::new(d(4), d(5), d(6)),
                 on_ground: b(9),
                 sprinting: b(10),
                 sneaking: b(11),
-                keys: Keys {
+                input: Input {
                     forward: b(12),
                     back: b(13),
                     left: b(14),
                     right: b(15),
+                    jump: b(16),
+                    shift: b(17),
+                    sprint: b(18),
+                    yaw: fl(7),
+                    pitch: fl(8),
                 },
-                jump: b(16),
             });
         }
         rows
     }
 
+    /// The recorded session, one tick at a time on a flat world, seeded from each tick's
+    /// predecessor: every flat-ground tick that is not disturbed by something the session had that
+    /// a flat world lacks (walls, speed effects, ...) must reproduce the game's velocity and
+    /// position bit for bit.
     #[test]
     fn reproduces_flat_ground_walk() {
-        let rows = parse();
+        let rows = parse_walk();
         let mut qualifying = 0usize;
         let mut exact = 0usize;
         let mut close = 0usize;
-        let mut obstructed = 0usize;
         let mut worst_close = 0.0_f64;
-        let mut worst_info = String::new();
         for t in 0..rows.len() - 1 {
-            let a = &rows[t];
-            let b = &rows[t + 1];
+            let (a, b) = (&rows[t], &rows[t + 1]);
             // Only the clean case: resting on flat ground (no y change), no jump this tick.
-            if !a.on_ground || !b.on_ground || a.y != b.y || b.jump {
+            if !a.on_ground || !b.on_ground || a.pos.y != b.pos.y || b.input.jump {
                 continue;
             }
             qualifying += 1;
-            let vel = Vec3::new(a.dx, a.dy, a.dz);
-            let pred = next_velocity(vel, b.yaw, a.on_ground, b.sprinting, b.sneaking, b.keys);
-            let err = (pred.x - b.dx)
-                .abs()
-                .max((pred.y - b.dy).abs())
-                .max((pred.z - b.dz).abs());
-            // Errors >= 1e-6 are horizontal collisions (the game zeroed a component): not
-            // modelled by the flat-ground path here. Everything else is unobstructed movement.
-            if err >= 1.0e-6 {
-                obstructed += 1;
+            let world = World::flat(a.pos.y.floor() as i32);
+            let mut p = PlayerState::new(a.pos, a.input.yaw);
+            p.vel = a.vel;
+            p.on_ground = true;
+            p.shift_key_down = a.sneaking;
+            p.zza = if a.input.forward && !a.input.back {
+                0.98
             } else {
+                0.0
+            };
+            if a.sprinting {
+                set_sprinting(&mut p, true);
+            }
+            tick(&mut p, &b.input, &world);
+            let err = (p.vel.x - b.vel.x)
+                .abs()
+                .max((p.vel.y - b.vel.y).abs())
+                .max((p.vel.z - b.vel.z).abs());
+            // A difference of 1e-6 or more is something the flat world cannot model (a wall the
+            // session ran into, the speed effects it was under); everything else is plain walking.
+            if err < 1.0e-6 {
                 close += 1;
-                if err == 0.0 {
+                if err == 0.0 && p.pos == b.pos {
                     exact += 1;
                 }
-                if err > worst_close {
-                    worst_close = err;
-                    worst_info = format!(
-                        "tick {} fwd={} l={} r={} sprint={} yaw={} vin=({},{}) dx:{}/{} dz:{}/{}",
-                        t + 1,
-                        b.keys.forward,
-                        b.keys.left,
-                        b.keys.right,
-                        b.sprinting,
-                        b.yaw,
-                        a.dx,
-                        a.dz,
-                        pred.x,
-                        b.dx,
-                        pred.z,
-                        b.dz
-                    );
-                }
+                worst_close = worst_close.max(err);
             }
         }
         eprintln!(
-            "qualifying={qualifying} unobstructed={close} (exact={exact}, worst={worst_close:e}) obstructed={obstructed}\nworst: {worst_info}"
+            "qualifying={qualifying} undisturbed={close} exact={exact} worst={worst_close:e}"
         );
         assert!(qualifying > 1000, "only {qualifying} qualifying ticks");
         assert!(
             close * 2 > qualifying,
-            "too few unobstructed ticks: {close}/{qualifying}"
+            "too few undisturbed ticks: {close}/{qualifying}"
         );
-        // Every unobstructed grounded tick must reproduce vanilla bit-for-bit.
-        assert!(
-            exact == close,
-            "{} of {close} unobstructed ticks not bit-exact; worst {worst_close:e}\n{worst_info}",
-            close - exact
-        );
+        assert_eq!(exact, close, "worst undisturbed error {worst_close:e}");
+    }
+
+    #[test]
+    fn collision_flags_for_walking_into_a_wall() {
+        let mut grid = ms_world::GridWorld::new(ms_world::FlatWorld::new(0, ms_data::AIR));
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        grid.fill((-5, -1, -5), (5, -1, 5), stone);
+        grid.fill((-5, 0, 2), (5, 3, 2), stone);
+        let world = World::grid(grid);
+        let mut p = PlayerState::new(Vec3::new(0.5, 0.0, 0.5), 0.0);
+        let fwd = Input {
+            forward: true,
+            ..Input::default()
+        };
+        for _ in 0..40 {
+            tick(&mut p, &fwd, &world);
+        }
+        assert!(p.horizontal_collision);
+        assert!(p.pos.z <= 2.0 - 0.3 + 1e-6);
     }
 }
