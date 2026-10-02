@@ -195,7 +195,8 @@ pub fn identifier_hash(id: &str) -> i32 {
 
 /// The `namespace:path` form of an identifier string (borrowed when it already is).
 pub(crate) fn canonical_id(id: &str) -> std::borrow::Cow<'_, str> {
-    match id.find(':') {
+    // (A byte loop beats `str::find` for the short ids this sees.)
+    match id.as_bytes().iter().position(|&b| b == b':') {
         Some(i) if i > 0 => std::borrow::Cow::Borrowed(id),
         _ => {
             let (ns, path) = split_identifier(id);
@@ -508,17 +509,29 @@ impl Instance {
 }
 
 /// All of an entity's attribute instances (`AttributeMap`).
+///
+/// The hot read is [`Attributes::value`], which the physics asks for several times a tick; the
+/// instances (bases, modifier lists and hash tables, a couple of kilobytes) are only touched when a
+/// modifier changes. They live behind a pointer and the current values are mirrored in a small
+/// array of their own, so the per-tick reads stay within two cache lines of the player state
+/// instead of spreading over fourteen (this matters when thousands of players are stepped in turn).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attributes {
+    /// `getValue()` of each instance, indexed like [`Attribute::ALL`]; always equal to the
+    /// instance's own `value` (see `sync`).
+    values: [f64; Attribute::ALL.len()],
     /// One instance per [`Attribute::ALL`] entry, in that order.
-    instances: [Instance; Attribute::ALL.len()],
+    instances: Box<[Instance; Attribute::ALL.len()]>,
 }
 
 impl Attributes {
     /// The player's attributes at their base values, without modifiers.
     pub fn player() -> Self {
+        let instances: [Instance; Attribute::ALL.len()] =
+            std::array::from_fn(|i| Instance::new(Attribute::ALL[i]));
         Self {
-            instances: std::array::from_fn(|i| Instance::new(Attribute::ALL[i])),
+            values: std::array::from_fn(|i| instances[i].value),
+            instances: Box::new(instances),
         }
     }
 
@@ -528,6 +541,12 @@ impl Attributes {
 
     fn instance_mut(&mut self, a: Attribute) -> &mut Instance {
         &mut self.instances[a.index()]
+    }
+
+    /// Re-mirror the instance's value after it may have changed.
+    #[inline]
+    fn sync(&mut self, a: Attribute) {
+        self.values[a.index()] = self.instances[a.index()].value;
     }
 
     /// `AttributeInstance.getBaseValue`.
@@ -541,6 +560,7 @@ impl Attributes {
         if value != inst.base {
             inst.base = value;
             inst.recompute(a);
+            self.sync(a);
         }
     }
 
@@ -553,6 +573,9 @@ impl Attributes {
     /// `AttributeInstance.getModifier`.
     pub fn modifier(&self, a: Attribute, id: &str) -> Option<&Modifier> {
         let inst = self.instance(a);
+        if inst.mods.is_empty() {
+            return None;
+        }
         let id = canonical_id(id);
         inst.position(&id).map(|i| &inst.mods[i])
     }
@@ -569,6 +592,7 @@ impl Attributes {
         let inst = self.instance_mut(a);
         inst.remove(a, &modifier.id);
         inst.add(a, modifier);
+        self.sync(a);
     }
 
     /// `AttributeInstance.addOrUpdateTransientModifier`: replace the modifier with this id in
@@ -576,12 +600,15 @@ impl Attributes {
     pub fn add_or_update_modifier(&mut self, a: Attribute, mut modifier: Modifier) {
         modifier.id = canonical_id(&modifier.id).into_owned();
         self.instance_mut(a).put(a, modifier);
+        self.sync(a);
     }
 
     /// `AttributeInstance.removeModifier(Identifier)`; returns whether one was applied.
     pub fn remove_modifier(&mut self, a: Attribute, id: &str) -> bool {
         let id = canonical_id(id);
-        self.instance_mut(a).remove(a, &id)
+        let removed = self.instance_mut(a).remove(a, &id);
+        self.sync(a);
+        removed
     }
 
     /// `AttributeInstance.removeModifiers`: remove every modifier, one by one in application order.
@@ -591,6 +618,7 @@ impl Attributes {
         for id in ids {
             inst.remove(a, &id);
         }
+        self.sync(a);
     }
 
     /// What `ClientboundUpdateAttributesPacket` carries for one attribute: the base value and the
@@ -612,8 +640,9 @@ impl Attributes {
     }
 
     /// `AttributeInstance.getValue`.
+    #[inline]
     pub fn value(&self, a: Attribute) -> f64 {
-        self.instance(a).value
+        self.values[a.index()]
     }
 }
 

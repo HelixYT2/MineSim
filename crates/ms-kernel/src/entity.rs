@@ -66,10 +66,16 @@ pub fn on_pos(p: &PlayerState, world: &World, f: f32) -> (i32, i32, i32) {
             if !(f > 1.0E-5_f32) {
                 return support;
             }
-            let block = block_at(world, support);
-            let is_fence = ms_data::block_has_tag(block, "minecraft:fences");
-            let is_wall = ms_data::block_has_tag(block, "minecraft:walls");
-            let is_gate = ms_data::block_class(block) == "FenceGateBlock";
+            // With no fence, wall or gate anywhere in the world, the support is never its own top.
+            if !world.may_contain(
+                ms_data::class::FENCE | ms_data::class::WALL | ms_data::class::FENCE_GATE,
+            ) {
+                return (support.0, floor(p.pos.y - f64::from(f)), support.2);
+            }
+            let classes = ms_data::state_class(world.block_state(support.0, support.1, support.2));
+            let is_fence = classes & ms_data::class::FENCE != 0;
+            let is_wall = classes & ms_data::class::WALL != 0;
+            let is_gate = classes & ms_data::class::FENCE_GATE != 0;
             if (!(f <= 0.5) || !is_fence) && !is_wall && !is_gate {
                 (support.0, floor(p.pos.y - f64::from(f)), support.2)
             } else {
@@ -104,6 +110,10 @@ pub fn block_friction_at(world: &World, pos: (i32, i32, i32)) -> f32 {
 
 /// `Entity.getBlockJumpFactor`.
 pub fn block_jump_factor(p: &PlayerState, world: &World) -> f32 {
+    // A world without a block of a special jump factor has 1.0 at both positions.
+    if !world.may_contain(ms_data::class::JUMP_FACTOR) {
+        return 1.0;
+    }
     let f = ms_data::block_jump_factor(block_at(world, block_position(p)));
     let g = ms_data::block_jump_factor(block_at(
         world,
@@ -118,10 +128,26 @@ pub fn block_jump_factor(p: &PlayerState, world: &World) -> f32 {
 
 /// `LivingEntity.getBlockSpeedFactor` over `Entity.getBlockSpeedFactor`.
 pub fn block_speed_factor(p: &PlayerState, world: &World) -> f32 {
-    let block = block_at(world, block_position(p));
-    let f = ms_data::block_speed_factor(block);
-    let name = ms_data::block_name(block);
-    let base = if name != "minecraft:water" && name != "minecraft:bubble_column" {
+    let base = if !world.may_contain(ms_data::class::SPEED_FACTOR) {
+        // Every block has the default speed factor, wherever the two lookups would land.
+        1.0
+    } else {
+        block_speed_factor_base(p, world)
+    };
+    // Mth.lerp((float) movement_efficiency, base, 1.0F)
+    let efficiency = p.attributes.value(Attribute::MovementEfficiency) as f32;
+    base + efficiency * (1.0_f32 - base)
+}
+
+/// The block-dependent part of [`block_speed_factor`]: the factor of the block the feet are in, or
+/// (when that is 1.0 and it is not water or a bubble column) of the block below.
+fn block_speed_factor_base(p: &PlayerState, world: &World) -> f32 {
+    let (x, y, z) = block_position(p);
+    let state = world.block_state(x, y, z);
+    let f = ms_data::block_speed_factor(ms_data::block_of_state(state));
+    let water_or_bubbles =
+        ms_data::state_class(state) & ms_data::class::WATER_OR_BUBBLE_COLUMN != 0;
+    if !water_or_bubbles {
         if f == 1.0 {
             ms_data::block_speed_factor(block_at(
                 world,
@@ -132,10 +158,7 @@ pub fn block_speed_factor(p: &PlayerState, world: &World) -> f32 {
         }
     } else {
         f
-    };
-    // Mth.lerp((float) movement_efficiency, base, 1.0F)
-    let efficiency = p.attributes.value(Attribute::MovementEfficiency) as f32;
-    base + efficiency * (1.0_f32 - base)
+    }
 }
 
 /// `Entity.checkSupportingBlock`: refresh the supporting block and the "on ground without any
@@ -317,6 +340,11 @@ pub fn check_fall_damage(
 /// (up to the fluid surface). This is the `ClipContext.Block.FALLDAMAGE_RESETTING` /
 /// `Fluid.WATER` raycast of `Entity.move`, reduced to the question of whether it hits anything.
 fn fall_reset_clip_hits(world: &World, from: Vec3, to: Vec3) -> bool {
+    // Only water and fall-damage-resetting blocks can be hit: without either anywhere in the world
+    // every cell below is skipped.
+    if !world.may_contain(ms_data::class::FLUID | ms_data::class::FALL_DAMAGE_RESETTING) {
+        return false;
+    }
     let (x0, x1) = (floor(from.x.min(to.x)), floor(from.x.max(to.x)));
     let (y0, y1) = (floor(from.y.min(to.y)), floor(from.y.max(to.y)));
     let (z0, z1) = (floor(from.z.min(to.z)), floor(from.z.max(to.z)));
@@ -328,9 +356,8 @@ fn fall_reset_clip_hits(world: &World, from: Vec3, to: Vec3) -> bool {
                 if state == ms_data::AIR {
                     continue;
                 }
-                let block = ms_data::block_of_state(state);
                 let mut top = None;
-                if ms_data::block_has_tag(block, "minecraft:fall_damage_resetting") {
+                if ms_data::state_class(state) & ms_data::class::FALL_DAMAGE_RESETTING != 0 {
                     top = Some(1.0);
                 }
                 let fluid = ms_data::fluid(state);

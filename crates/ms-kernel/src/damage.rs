@@ -634,18 +634,25 @@ fn player_box(p: &PlayerState, pos: Vec3) -> Aabb {
 
 /// `Entity.getBlockSpeedFactor` with the `LivingEntity` override (movement efficiency), at `pos`.
 fn block_speed_factor(p: &PlayerState, world: &World, pos: Vec3) -> f32 {
-    let (x, y, z) = (mth_floor(pos.x), mth_floor(pos.y), mth_floor(pos.z));
-    let here = ms_data::block_speed_factor(world.block(x, y, z));
-    let name = world.block_name(x, y, z);
-    let base = if name != "minecraft:water" && name != "minecraft:bubble_column" {
-        if here == 1.0 {
-            let (bx, by, bz) = on_pos(p, pos, 0.500_001);
-            ms_data::block_speed_factor(world.block(bx, by, bz))
+    let base = if !world.may_contain(ms_data::class::SPEED_FACTOR) {
+        // Every block has the default speed factor, wherever the two lookups would land.
+        1.0
+    } else {
+        let (x, y, z) = (mth_floor(pos.x), mth_floor(pos.y), mth_floor(pos.z));
+        let state = world.block_state(x, y, z);
+        let here = ms_data::block_speed_factor(ms_data::block_of_state(state));
+        let water_or_bubbles =
+            ms_data::state_class(state) & ms_data::class::WATER_OR_BUBBLE_COLUMN != 0;
+        if !water_or_bubbles {
+            if here == 1.0 {
+                let (bx, by, bz) = on_pos(p, pos, 0.500_001);
+                ms_data::block_speed_factor(world.block(bx, by, bz))
+            } else {
+                here
+            }
         } else {
             here
         }
-    } else {
-        here
     };
     let efficiency = p.attributes.value(Attribute::MovementEfficiency) as f32;
     // Mth.lerp(efficiency, base, 1.0F)
@@ -654,6 +661,10 @@ fn block_speed_factor(p: &PlayerState, world: &World, pos: Vec3) -> f32 {
 
 /// `Entity.getBlockJumpFactor` at `pos`.
 fn block_jump_factor(p: &PlayerState, world: &World, pos: Vec3) -> f32 {
+    // A world without a block of a special jump factor has 1.0 at both positions.
+    if !world.may_contain(ms_data::class::JUMP_FACTOR) {
+        return 1.0;
+    }
     let (x, y, z) = (mth_floor(pos.x), mth_floor(pos.y), mth_floor(pos.z));
     let here = ms_data::block_jump_factor(world.block(x, y, z));
     let (bx, by, bz) = on_pos(p, pos, 0.500_001);
@@ -812,8 +823,13 @@ fn server_ai_step(p: &mut PlayerState, world: &World) {
 
     // LivingEntity.travelInAir with a zero input vector.
     let friction: f32 = if p.server.on_ground {
-        let (bx, by, bz) = on_pos(p, pos, 0.500_001);
-        ms_data::block_friction(world.block(bx, by, bz))
+        if !world.may_contain(ms_data::class::FRICTION) {
+            // Every block has the default friction.
+            ms_data::DEFAULT_FRICTION
+        } else {
+            let (bx, by, bz) = on_pos(p, pos, 0.500_001);
+            ms_data::block_friction(world.block(bx, by, bz))
+        }
     } else {
         1.0
     };

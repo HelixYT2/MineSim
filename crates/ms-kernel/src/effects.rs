@@ -144,7 +144,17 @@ pub struct Effects {
 
 impl Effects {
     /// The active effect with this registry id (`minecraft:` may be left out).
+    #[inline]
     pub fn get(&self, id: &str) -> Option<&EffectInstance> {
+        // The common case: nothing active, so no id can match (and the id need not be normalised).
+        if self.list.is_empty() {
+            return None;
+        }
+        self.find(id)
+    }
+
+    #[inline(never)]
+    fn find(&self, id: &str) -> Option<&EffectInstance> {
         let id = canonical_id(id);
         self.list.iter().find(|e| e.id == id)
     }
