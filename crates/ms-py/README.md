@@ -1,7 +1,8 @@
 # minesim
 
 Python bindings for [MineSim](https://github.com/HelixYT2/MineSim) — a bit-exact, native-Rust
-reimplementation of Minecraft Java 1.21.11 movement physics, built for reinforcement learning.
+reimplementation of Minecraft Java 1.21.11 player physics (movement, collision, fluids, climbing,
+status effects, damage, knockback and projectiles), built for reinforcement learning.
 
 ```python
 import minesim

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "minesim"
-description = "Bit-exact Minecraft 1.21.11 movement simulator for reinforcement learning"
+description = "Bit-exact Minecraft 1.21.11 player simulator for reinforcement learning"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
