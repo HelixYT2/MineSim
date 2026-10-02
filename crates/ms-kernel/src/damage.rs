@@ -50,9 +50,31 @@
 //! placed (spawn, teleport with a velocity reset): it makes the server's copy agree with the
 //! client's.
 //!
-//! Not modelled: armour and shields, difficulty scaling of mob damage, fire/drowning/in-wall/
-//! freezing and other environmental damage sources (the caller passes whatever it wants through
-//! [`hurt`]), death beyond `health == 0`, and the server-only food exhaustion that damage adds.
+//! # The server's environment: magma and powder snow
+//!
+//! [`server_do_tick`] also runs the part of `LivingEntity.aiStep`/`Entity.applyEffectsFromBlocks`
+//! that only the server does and that the client sees only as packets:
+//!
+//! * magma's `hot_floor` damage, in the tick in which the server's own copy is on the ground and
+//!   the player is not sneaking (so it lands a tick before the client's own landing in a downward
+//!   bubble column, the corpus's `bubble_columns`), and the freeze step: `ticksFrozen`,
+//!   its decay, the movement-speed slowdown and the freeze damage ([`ServerState`]);
+//! * `ticksFrozen` and the freeze modifier are synced by the entity tracker pass ([`sync_motion`])
+//!   at the start of the *next* server tick, so they reach the client two client ticks after the
+//!   movement they follow (a hit's health and damage event are sent at once, one tick). The client
+//!   increments its own `ticksFrozen` meanwhile and has it replaced by the server's value.
+//!
+//! The recordings show one more effect the model cannot reproduce: the two threads' phase drifts by
+//! a tick now and then, so a server packet reaches the client one tick late or early, or two are
+//! merged into one (corpus `powder_snow`: six such events in 185 ticks; `bubble_columns`: the burns
+//! come every ten ticks from tick 95 to 155, then at 164 and 174, a tick early, then at 185 and 195,
+//! back on the grid). The model delivers each value at its nominal tick; every one of those events
+//! is pinned, and shown to be a pure shift of a packet, in `tests/freeze_hot_floor.rs`.
+//!
+//! Not modelled: armour and shields, difficulty scaling of mob damage, fire/drowning/in-wall and
+//! other environmental damage sources (the caller passes whatever it wants through [`hurt`]),
+//! death beyond `health == 0`, the server-only food exhaustion that damage adds, and the server's
+//! own copy of the stuck-speed multiplier of cobwebs, berries and powder snow.
 
 use crate::attributes::Attribute;
 use crate::state::PlayerState;
@@ -327,15 +349,98 @@ pub struct ServerState {
     /// `Entity.hurtMarked`: the server's velocity has to be sent to the client; see
     /// [`sync_motion`].
     pub hurt_marked: bool,
+
+    // ---- Freezing (powder snow). The server owns `ticksFrozen` and the freeze slowdown on the
+    // movement speed; the client only increments its own `ticksFrozen` from the inside-block effect
+    // and otherwise sees what the server sends, one server tick after the server computed it.
+    /// The server's `ticksFrozen` (`DATA_TICKS_FROZEN`) as of the end of its last tick.
+    pub ticks_frozen: i32,
+    /// The freeze modifier the server's `tryAddFrost` left on its movement-speed attribute, as the
+    /// server `ticksFrozen` it was computed from (`None`: no modifier).
+    pub frost: Option<i32>,
+    /// The `ticksFrozen` the client was last sent (the entity-data tracker only sends changes).
+    pub sent_ticks_frozen: i32,
+    /// The freeze modifier the client was last sent.
+    pub sent_frost: Option<i32>,
+    /// `FREEZE` inside-block effects (one per step of the movement that touched powder snow) the
+    /// client tick raised since the server's last tick: the server's own `applyEffectsFromBlocks`
+    /// sees the same movement and raises the same number. Counted where the client applies them
+    /// ([`note_freeze_step`]) and consumed by [`server_do_tick`].
+    pub freeze_steps: i32,
+    /// The server's `isInPowderSnow` of this tick: a `FREEZE` was raised since its last tick.
+    pub in_powder_snow: bool,
+    /// `CLEAR_FREEZE` (lava) was raised since the server's last tick, after `freeze_steps` was last
+    /// reset; see [`note_thaw`].
+    pub thawed: bool,
+
+    /// The bubble columns the client's movement of this tick was pushed by, as
+    /// `(drag_down, open_above)` per `BubbleColumnBlock.entityInside` call (the first
+    /// `bubble_count` entries; more than four in one tick are not tracked). The server's copy of
+    /// the player moves through the same blocks, and its velocity is pushed the same way after
+    /// its own `travel`; see [`note_bubble_column`].
+    pub bubble: [(bool, bool); 4],
+    pub bubble_count: u8,
+
+    /// The server player's own `tickCount` (counts its server ticks, from when it joined; not
+    /// reset by teleports). It decides which tick the freeze damage lands on: every tick whose
+    /// count is a multiple of 40. It starts at zero like the client's counter of a fresh player, so
+    /// the two agree there; a recording or a restored snapshot may have them offset.
+    pub tick_count: i32,
+}
+
+/// Record that the client's `BubbleColumnBlock.entityInside` pushed the player (`drag_down`: the
+/// column pulls down; `open_above`: the player is at the top of the column, where the push is
+/// stronger and does not reset the fall distance). The server applies it to its copy of the
+/// velocity in [`server_do_tick`], which is what makes the server's copy sink in a downward column
+/// as fast as the client does and so land on the column's floor a tick ahead of it.
+pub fn note_bubble_column(p: &mut PlayerState, drag_down: bool, open_above: bool) {
+    let s = &mut p.server;
+    if usize::from(s.bubble_count) < s.bubble.len() {
+        s.bubble[usize::from(s.bubble_count)] = (drag_down, open_above);
+        s.bubble_count += 1;
+    }
+}
+
+/// Record that the client tick raised the `FREEZE` inside-block effect for one step of its
+/// movement; the server's tick will raise it as often (see [`ServerState::freeze_steps`]).
+pub fn note_freeze_step(p: &mut PlayerState) {
+    p.server.freeze_steps = p.server.freeze_steps.saturating_add(1);
+    p.server.in_powder_snow = true;
+}
+
+/// Record that the client tick raised `CLEAR_FREEZE` (lava): everything frozen before it is gone on
+/// the server too.
+pub fn note_thaw(p: &mut PlayerState) {
+    p.server.freeze_steps = 0;
+    p.server.thawed = true;
 }
 
 /// Make the server's copy of the player agree with the client's (after spawning or placing the
-/// player): velocity and ground flag.
+/// player): velocity, ground flag, and the freeze state (what the client has is what the server
+/// last sent it).
 pub fn reset_server_copy(p: &mut PlayerState) {
     p.server_vel = p.vel;
     p.server.on_ground = p.on_ground;
     p.server.pending_fall = None;
     p.server.hurt_marked = false;
+    p.server.ticks_frozen = p.ticks_frozen;
+    p.server.sent_ticks_frozen = p.ticks_frozen;
+    let frost = p
+        .attributes
+        .has_modifier(
+            Attribute::MovementSpeed,
+            crate::effects::POWDER_SNOW_MODIFIER_ID,
+        )
+        .then_some(
+            p.ticks_frozen
+                .clamp(1, crate::effects::ticks_required_to_freeze()),
+        );
+    p.server.frost = frost;
+    p.server.sent_frost = frost;
+    p.server.freeze_steps = 0;
+    p.server.in_powder_snow = false;
+    p.server.thawed = false;
+    p.server.bubble_count = 0;
 }
 
 /// `getMaxAbsorption()`: the absorption effect adds `4 * (amplifier + 1)` to a base of 0.
@@ -455,6 +560,24 @@ pub fn sync_motion(p: &mut PlayerState) {
     if p.server.hurt_marked {
         p.server.hurt_marked = false;
         p.vel = lp_vec3_quantize(p.server_vel);
+    }
+    // The same tracker pass sends the entity data and attribute changes the server's last tick
+    // made: `ticksFrozen` replaces the client's own count (it has raised it itself meanwhile), and
+    // the freeze modifier replaces the one on the client's movement speed. Both therefore reach the
+    // client one server tick after the server computed them, which is two client ticks after the
+    // movement they follow (the corpus: `powder_snow`, `ladder_climb`).
+    let s = &mut p.server;
+    if s.ticks_frozen != s.sent_ticks_frozen {
+        s.sent_ticks_frozen = s.ticks_frozen;
+        p.ticks_frozen = s.ticks_frozen;
+    }
+    let s = &mut p.server;
+    if s.frost != s.sent_frost {
+        s.sent_frost = s.frost;
+        let frost = s.frost;
+        crate::effects::client_set_frost(p, frost);
+        // `Player.getSpeed` follows the attribute.
+        p.speed = crate::living::speed(p);
     }
 }
 
@@ -732,9 +855,10 @@ fn handle_move_packet(p: &mut PlayerState, start: &TickStart, world: &World) {
 
 /// `Entity.move(MoverType.SELF, deltaMovement)` of the server's copy at `pos`; updates the
 /// server's ground flag and velocity (collision zeroing, `updateEntityMovementAfterFallOn`, block
-/// speed factor). The position the move reaches is discarded by the caller, as
+/// speed factor) and returns the position the move reaches. The caller uses it for the server's
+/// block queries of the rest of the tick and then discards it, as
 /// `ServerGamePacketListenerImpl.tickPlayer` restores the position after `doTick`.
-fn server_move_self(p: &mut PlayerState, world: &World, pos: Vec3) {
+fn server_move_self(p: &mut PlayerState, world: &World, pos: Vec3) -> Vec3 {
     let motion = p.server_vel;
     let bb = player_box(p, pos);
     let step = p.attributes.value(Attribute::StepHeight) as f32;
@@ -780,6 +904,7 @@ fn server_move_self(p: &mut PlayerState, world: &World, pos: Vec3) {
     let f = block_speed_factor(p, world, new_pos);
     let v = p.server_vel;
     p.server_vel = Vec3::new(v.x * f64::from(f), v.y * 1.0, v.z * f64::from(f));
+    new_pos
 }
 
 /// `LivingEntity.getEffectiveGravity` for the server's copy.
@@ -793,8 +918,9 @@ fn effective_gravity(p: &PlayerState) -> f64 {
 }
 
 /// `ServerPlayer.doTick` as it acts on the server's copy of the velocity: `LivingEntity.aiStep`
-/// (velocity thresholds, then `travel` with a zero input vector).
-fn server_ai_step(p: &mut PlayerState, world: &World) {
+/// (velocity thresholds, then `travel` with a zero input vector). Returns the position the server's
+/// copy ended the move at.
+fn server_ai_step(p: &mut PlayerState, world: &World) -> Vec3 {
     // Velocities below the thresholds are snapped to zero.
     let v = p.server_vel;
     let (mut x, mut y, mut z) = (v.x, v.y, v.z);
@@ -818,7 +944,7 @@ fn server_ai_step(p: &mut PlayerState, world: &World) {
         });
         p.server_vel = scratch.vel;
         p.server.on_ground = scratch.on_ground;
-        return;
+        return scratch.pos;
     }
 
     // LivingEntity.travelInAir with a zero input vector.
@@ -838,7 +964,7 @@ fn server_ai_step(p: &mut PlayerState, world: &World) {
     // a negative zero into a positive one.
     let v = p.server_vel;
     p.server_vel = Vec3::new(v.x + 0.0, v.y + 0.0, v.z + 0.0);
-    server_move_self(p, world, pos);
+    let end = server_move_self(p, world, pos);
     let v = p.server_vel;
     let mut d = v.y;
     if let Some(levitation) = p.effects.get("minecraft:levitation") {
@@ -851,6 +977,7 @@ fn server_ai_step(p: &mut PlayerState, world: &World) {
         d * f64::from(0.98_f32),
         v.z * f64::from(g),
     );
+    end
 }
 
 /// One server tick for the player, run after the client's tick of the same game tick (see the
@@ -893,7 +1020,123 @@ pub fn server_move_packet(p: &mut PlayerState, start: &TickStart, world: &World)
 /// Step 2 of [`server_tick`] alone: `ServerPlayer.doTick`'s effect on the server's copy of the
 /// velocity, from the position currently in `p.pos` (the last position a packet reported).
 pub fn server_do_tick(p: &mut PlayerState, world: &World) {
-    server_ai_step(p, world);
+    // ServerLevel.tickNonPassenger: `tickCount++` before the entity's tick.
+    p.server.tick_count = p.server.tick_count.wrapping_add(1);
+    let end = server_ai_step(p, world);
+    server_apply_effects_from_blocks(p, world, end);
+    server_freeze(p, world, end);
+}
+
+/// `Entity.getOnPosLegacy` for the server's copy of the player standing at `end` (the block it
+/// stands on, with the fence, wall and gate rows of a supporting block), using the supporting block
+/// the client reported.
+fn server_on_pos_legacy(p: &mut PlayerState, world: &World, end: Vec3) -> (i32, i32, i32) {
+    let here = p.pos;
+    p.pos = end;
+    let on = crate::blocks::on_pos(p, world, 0.2);
+    p.pos = here;
+    on
+}
+
+/// The server's `Entity.applyEffectsFromBlocks` after its own `travel`, as far as it acts on what
+/// the client sees: when the server's copy is on the ground (its own flag, which its collision
+/// result in this very tick may just have set, ahead of the client's), `Block.stepOn` runs for the
+/// block under it (`getOnPosLegacy` at the server's position `end`). Magma hurts a player that is
+/// not sneaking (`isSteppingCarefully` is the server's shift flag, which the client's input packet
+/// of this tick has already set) with the `hot_floor` damage of 1.0, which fire resistance cancels
+/// before the invulnerability window is looked at. The client never does this: its `hurt` is
+/// `hurtClient`, which does nothing.
+///
+/// The damage therefore lands in the server tick in which the server's own copy lands, the one
+/// that handles the move packet of the client's last airborne tick, and reaches the client at the
+/// start of its next tick: before the client's own landing tick when the server is ahead (the
+/// recording `bubble_columns`: first burn visible at the start of the tick the client lands in).
+/// After that it repeats every ten ticks, each time the invulnerability window (20 ticks, damage
+/// accepted again at 10 or less) allows.
+fn server_apply_effects_from_blocks(p: &mut PlayerState, world: &World, end: Vec3) {
+    if p.server.on_ground {
+        let on = server_on_pos_legacy(p, world, end);
+        if crate::blocks::is_hot_floor(world, on)
+            && !p.shift_key_down
+            && !p.effects.has(crate::effects::FIRE_RESISTANCE)
+        {
+            hurt(p, DamageSource::Generic, 1.0);
+        }
+    }
+    // The bubble columns the movement went through push the server's velocity too (the fluid
+    // module's rules, lent the server's velocity and the client's fall distance untouched).
+    let n = usize::from(p.server.bubble_count);
+    if n > 0 {
+        let (client_vel, client_fall) = (p.vel, p.fall_distance);
+        p.vel = p.server_vel;
+        for i in 0..n {
+            let (drag_down, open_above) = p.server.bubble[i];
+            if open_above {
+                crate::fluids::on_above_bubble_column(p, drag_down);
+            } else {
+                crate::fluids::on_inside_bubble_column(p, drag_down);
+            }
+        }
+        p.server_vel = p.vel;
+        p.vel = client_vel;
+        p.fall_distance = client_fall;
+        p.server.bubble_count = 0;
+    }
+}
+
+/// `Entity.FREEZE_HURT_FREQUENCY`: the freeze damage comes every 40 ticks of the entity's own
+/// `tickCount` ([`ServerState::tick_count`]).
+const FREEZE_HURT_FREQUENCY: i32 = 40;
+
+/// The server's powder-snow bookkeeping: the `FREEZE`/`CLEAR_FREEZE` effects its
+/// `applyEffectsFromBlocks` raised (the movement it saw is the client's, so they are the ones the
+/// client counted, see [`ServerState::freeze_steps`]), then the `ServerLevel` branch of
+/// `LivingEntity.aiStep`:
+///
+/// * `FREEZE` (per step): `isInPowderSnow = true` and, if the player can freeze,
+///   `ticksFrozen = min(140, ticksFrozen + 1)`; `CLEAR_FREEZE`: `ticksFrozen = 0`;
+/// * not in powder snow (or unable to freeze): `ticksFrozen = max(0, ticksFrozen - 2)`;
+/// * `removeFrost`, then `tryAddFrost`: with `ticksFrozen > 0` and a block under the feet
+///   (`getBlockStateOnLegacy` at the server's position `end`) that is not air, the movement speed
+///   gets the `minecraft:powder_snow` modifier of `-0.05F * percentFrozen`;
+/// * every 40th tick of a fully frozen (140) player: 1.0 of `freeze` damage (not fire, no
+///   knockback, armour-piercing; the invulnerability window applies).
+///
+/// The results are not on the client yet: [`sync_motion`] of the next tick sends them.
+fn server_freeze(p: &mut PlayerState, world: &World, end: Vec3) {
+    use crate::effects::{can_freeze, is_fully_frozen, ticks_required_to_freeze};
+    let can = can_freeze(p);
+    let s = &mut p.server;
+    if s.thawed {
+        s.ticks_frozen = 0;
+    }
+    if can {
+        s.ticks_frozen = s
+            .ticks_frozen
+            .saturating_add(s.freeze_steps)
+            .min(ticks_required_to_freeze());
+    }
+    let in_powder_snow = s.in_powder_snow;
+    s.freeze_steps = 0;
+    s.thawed = false;
+    s.in_powder_snow = false;
+    if !in_powder_snow || !can {
+        s.ticks_frozen = (s.ticks_frozen - 2).max(0);
+    }
+    // removeFrost + tryAddFrost
+    let ticks = s.ticks_frozen;
+    let on = server_on_pos_legacy(p, world, end);
+    let under = world.block_state(on.0, on.1, on.2);
+    // `BlockState.isAir`: air, cave air and void air.
+    let standing_on_air = under == ms_data::AIR
+        || matches!(
+            world.block_name(on.0, on.1, on.2),
+            "minecraft:cave_air" | "minecraft:void_air"
+        );
+    p.server.frost = (ticks > 0 && !standing_on_air).then_some(ticks);
+    if p.server.tick_count % FREEZE_HURT_FREQUENCY == 0 && is_fully_frozen(ticks) && can {
+        hurt(p, DamageSource::Generic, 1.0);
+    }
 }
 
 #[cfg(test)]
@@ -1211,5 +1454,241 @@ mod tests {
         );
         assert_eq!(p.server_vel.z, 0.2 * f64::from(1.0_f32 * 0.91));
         assert!(!p.server.on_ground);
+    }
+
+    // ---- magma and powder snow
+
+    /// A stone floor (top at y = -63) with `blocks` placed on or in it.
+    fn world_with(blocks: &[((i32, i32, i32), &str)]) -> World {
+        let stone = ms_data::parse_state("minecraft:stone").unwrap();
+        let mut grid = ms_world::GridWorld::new(ms_world::FlatWorld::new(-63, stone));
+        for ((x, y, z), name) in blocks {
+            grid.set_block(*x, *y, *z, ms_data::parse_state(name).unwrap());
+        }
+        World::grid(grid)
+    }
+
+    /// One arena step (client tick, then the server's handling), the order `ms-arena` runs.
+    fn step(p: &mut PlayerState, world: &World) {
+        let start = TickStart::of(p);
+        crate::player::tick(p, &crate::state::Input::default(), world);
+        server_move_packet(p, &start, world);
+        sync_motion(p);
+        server_do_tick(p, world);
+    }
+
+    /// A player at rest (the velocity a standing player carries into its next tick).
+    fn standing() -> PlayerState {
+        let mut p = player();
+        p.on_ground = true;
+        p.vel = Vec3::new(0.0, -0.08 * f64::from(0.98_f32), 0.0);
+        p
+    }
+
+    /// A player resting on the magma block at (0, -64, 0).
+    fn on_magma() -> (PlayerState, World) {
+        let world = world_with(&[((0, -64, 0), "minecraft:magma_block")]);
+        let mut p = standing();
+        reset_server_copy(&mut p);
+        (p, world)
+    }
+
+    #[test]
+    fn magma_burns_from_the_server_copy_not_from_the_client_tick() {
+        let (mut p, world) = on_magma();
+        // The client's own tick on magma does not hurt (its `hurt` is a no-op)...
+        crate::player::tick(&mut p, &crate::state::Input::default(), &world);
+        assert_eq!(p.health, 20.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (0, 0));
+        // ...the server, whose copy is on the ground, burns it: 1.0 with the hurt window set.
+        let (mut p, world) = on_magma();
+        step(&mut p, &world);
+        assert_eq!(p.health, 19.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (20, 10));
+        // No knockback and no velocity change from a hot-floor burn (the velocity sync only
+        // quantizes what the server copy has).
+        assert_eq!(p.last_hurt, 1.0);
+    }
+
+    #[test]
+    fn magma_burns_again_only_when_the_invulnerability_window_allows() {
+        let (mut p, world) = on_magma();
+        let mut burns = Vec::new();
+        for t in 0..32 {
+            let before = p.health;
+            step(&mut p, &world);
+            if p.health < before {
+                burns.push(t);
+            }
+        }
+        // the first step burns; the window (20) lets the next hit through once it is down to 10
+        assert_eq!(burns, vec![0, 10, 20, 30]);
+    }
+
+    #[test]
+    fn magma_does_not_burn_a_sneaking_player_or_one_with_fire_resistance() {
+        let (mut p, world) = on_magma();
+        p.shift_key_down = true;
+        let start = TickStart::of(&p);
+        server_move_packet(&mut p, &start, &world);
+        server_do_tick(&mut p, &world);
+        assert_eq!(p.health, 20.0);
+        // Fire resistance: `hot_floor` is a fire damage, refused before the hurt window is touched.
+        let (mut q, world) = on_magma();
+        crate::effects::add_effect(&mut q, crate::effects::FIRE_RESISTANCE, 0, 100);
+        step(&mut q, &world);
+        assert_eq!(q.health, 20.0);
+        assert_eq!((q.invulnerable_time, q.hurt_time), (0, 0));
+    }
+
+    #[test]
+    fn magma_burns_when_the_server_copy_lands_ahead_of_the_client() {
+        // The client is still half a block above the floor in the air, falling at 0.5 per tick,
+        // when the server's copy (whose own tick moves it from the position the client reported)
+        // reaches the magma: the burn happens now, in the server tick that handles that packet.
+        let world = world_with(&[((0, -64, 0), "minecraft:magma_block")]);
+        let mut p = player();
+        p.pos = Vec3::new(0.5, -62.8, 0.5);
+        p.on_ground = false;
+        reset_server_copy(&mut p);
+        p.server_vel = Vec3::new(0.0, -0.5, 0.0);
+        server_do_tick(&mut p, &world);
+        assert_eq!(p.health, 19.0);
+        // a server copy that does not reach the floor does not burn
+        let mut q = player();
+        q.pos = Vec3::new(0.5, -61.0, 0.5);
+        q.on_ground = false;
+        reset_server_copy(&mut q);
+        q.server_vel = Vec3::new(0.0, -0.5, 0.0);
+        server_do_tick(&mut q, &world);
+        assert_eq!(q.health, 20.0);
+    }
+
+    fn in_powder_snow() -> (PlayerState, World) {
+        let world = world_with(&[((0, -63, 0), "minecraft:powder_snow")]);
+        let mut p = standing();
+        reset_server_copy(&mut p);
+        (p, world)
+    }
+
+    #[test]
+    fn freezing_reaches_the_client_two_ticks_after_the_movement() {
+        let (mut p, world) = in_powder_snow();
+        let frost = |p: &PlayerState| {
+            p.attributes.has_modifier(
+                Attribute::MovementSpeed,
+                crate::effects::POWDER_SNOW_MODIFIER_ID,
+            )
+        };
+        // Tick 1: the client freezes one tick; the server counts one too but has not sent it.
+        step(&mut p, &world);
+        assert_eq!((p.ticks_frozen, p.server.ticks_frozen), (1, 1));
+        assert!(!frost(&p));
+        // Tick 2: the tracker pass sends the server's tick 1: the client's own count (2) is
+        // replaced by the server's (1) and the slowdown for 1/140 appears.
+        step(&mut p, &world);
+        assert_eq!((p.ticks_frozen, p.server.ticks_frozen), (1, 2));
+        assert!(frost(&p));
+        assert_eq!(
+            p.attributes.value(Attribute::MovementSpeed).to_bits(),
+            (f64::from(0.1_f32) + f64::from(-0.05_f32 * (1.0_f32 / 140.0_f32))).to_bits()
+        );
+        step(&mut p, &world);
+        assert_eq!((p.ticks_frozen, p.server.ticks_frozen), (2, 3));
+        // The speed field follows the attribute.
+        assert_eq!(p.speed, crate::living::speed(&p));
+    }
+
+    #[test]
+    fn frozen_players_thaw_two_ticks_per_tick_outside_powder_snow() {
+        let world = world_with(&[]);
+        let mut p = standing();
+        p.ticks_frozen = 56;
+        crate::effects::client_set_frost(&mut p, Some(56));
+        reset_server_copy(&mut p);
+        // (The server's copy starts level with the client's; after the first tick it is two ahead.)
+        let mut seen = Vec::new();
+        for _ in 0..30 {
+            step(&mut p, &world);
+            seen.push(p.ticks_frozen);
+        }
+        // The client shows the server's value of the previous tick: 56 - 2n - 2 ...
+        assert_eq!(seen[0], 56);
+        assert_eq!(seen[1], 54);
+        assert_eq!(seen[2], 52);
+        assert_eq!(*seen.last().unwrap(), 0);
+        assert_eq!(p.server.ticks_frozen, 0);
+        // When it reaches zero the modifier is gone again.
+        assert!(!p.attributes.has_modifier(
+            Attribute::MovementSpeed,
+            crate::effects::POWDER_SNOW_MODIFIER_ID
+        ));
+        assert_eq!(
+            p.attributes.value(Attribute::MovementSpeed).to_bits(),
+            f64::from(0.1_f32).to_bits()
+        );
+    }
+
+    #[test]
+    fn no_slowdown_while_frozen_over_air() {
+        // Frozen but the block under the feet (`getBlockStateOnLegacy`) is air: no modifier.
+        let world = world_with(&[((0, -64, 0), "minecraft:air")]);
+        let mut p = player();
+        p.pos = Vec3::new(0.5, -60.0, 0.5);
+        p.server.ticks_frozen = 30;
+        p.ticks_frozen = 30;
+        p.server.sent_ticks_frozen = 30;
+        server_do_tick(&mut p, &world);
+        assert_eq!(p.server.ticks_frozen, 28);
+        assert_eq!(p.server.frost, None);
+        // Standing on stone it would have one.
+        let world = world_with(&[]);
+        let mut q = player();
+        q.server.ticks_frozen = 30;
+        q.server.on_ground = true;
+        server_do_tick(&mut q, &world);
+        assert_eq!(q.server.frost, Some(28));
+    }
+
+    #[test]
+    fn a_fully_frozen_player_takes_one_damage_every_forty_ticks() {
+        let (mut p, world) = in_powder_snow();
+        p.server.ticks_frozen = 140;
+        p.ticks_frozen = 140;
+        p.server.sent_ticks_frozen = 140;
+        p.server.tick_count = 36;
+        let mut hits = Vec::new();
+        for t in 0..90 {
+            let before = p.health;
+            // keep the freeze alive: the client tick would add its own steps
+            step(&mut p, &world);
+            if p.health < before {
+                hits.push((t, p.server.tick_count));
+            }
+        }
+        // The server's tick counts 37, 38, ...: its 40th is the fourth step, then every 40th.
+        assert_eq!(hits, vec![(3, 40), (43, 80), (83, 120)]);
+        // Not fully frozen: no damage at the same tick counts.
+        let (mut q, world) = in_powder_snow();
+        q.server.ticks_frozen = 139;
+        q.server.tick_count = 39;
+        let start = TickStart::of(&q);
+        server_move_packet(&mut q, &start, &world);
+        server_do_tick(&mut q, &world);
+        // (139 + no steps - 2 = 137 < 140)
+        assert_eq!(q.health, 20.0);
+    }
+
+    #[test]
+    fn lava_thaws_the_server_too() {
+        let (mut p, world) = in_powder_snow();
+        p.server.ticks_frozen = 50;
+        p.ticks_frozen = 50;
+        p.server.sent_ticks_frozen = 50;
+        crate::fluids::clear_freeze(&mut p);
+        assert_eq!(p.ticks_frozen, 0);
+        server_do_tick(&mut p, &world);
+        assert_eq!(p.server.ticks_frozen, 0);
+        assert_eq!(p.server.frost, None);
     }
 }

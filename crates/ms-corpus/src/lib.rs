@@ -301,6 +301,20 @@ pub fn apply_pre(p: &mut PlayerState, pre: &Fields, prev_post: Option<&Fields>) 
         _ => Vec::new(),
     };
     ms_kernel::effects::client_apply_server_changes(p, effects.as_deref(), sprinting, &updated);
+    // The movement-speed packet also carries the server's freeze slowdown (`LivingEntity.tryAddFrost`
+    // runs only on the server, from the server's own `ticksFrozen` of that moment, which is not the
+    // client's: see `ms_kernel::damage::ServerState`). The recorded value says which one it was.
+    if updated.contains(&Attribute::MovementSpeed) {
+        let bits = attrs
+            .as_ref()
+            .and_then(|a| a.get(Attribute::MovementSpeed.name()))
+            .and_then(Value::as_i64);
+        if let Some(frost) =
+            bits.and_then(|b| ms_kernel::effects::frost_ticks_for_movement_speed(p, b as u64))
+        {
+            ms_kernel::effects::client_set_frost(p, frost);
+        }
+    }
 }
 
 fn parse_effects(v: &Value) -> Vec<EffectInstance> {

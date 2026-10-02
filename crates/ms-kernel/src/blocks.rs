@@ -39,8 +39,12 @@
 //! * Walking on powder snow with leather boots: the player has no equipment slots, so
 //!   `canEntityWalkOnPowderSnow` is always false ([`can_walk_on_powder_snow`] is the one place to
 //!   extend). `freezing via ticksFrozen`: the inside-block effect `FREEZE` raises `ticks_frozen` by
-//!   one per step in which it was triggered; the decay (`-2` per tick outside powder snow), the
-//!   frost overlay and the freeze damage are `LivingEntity.aiStep`'s, not this module's.
+//!   one per step in which it was triggered (and tells the server's copy of the player, which
+//!   raises its own count the same way); the decay (`-2` per tick outside powder snow), the freeze
+//!   slowdown of the movement speed and the freeze damage are the *server's* (`LivingEntity.aiStep`'s
+//!   `ServerLevel` branch), in `damage::server_do_tick`, and reach the client one tick later.
+//! * The `hot_floor` damage of magma is the server's too (the client's `hurt` does nothing): see
+//!   [`is_hot_floor`] and `damage::server_do_tick`.
 
 use crate::damage::{self, DamageSource};
 use crate::state::{PlayerState, Pose};
@@ -548,25 +552,30 @@ pub fn after_fall_on(p: &mut PlayerState, world: &World, landed_on: (i32, i32, i
 // ---------------------------------------------------------------------------------------------
 
 /// `Block.stepOn` for the block under the feet (`getOnPosLegacy`), called when the player is on
-/// the ground at the end of the tick: slime slows a slow-moving player down unless it sneaks, and
-/// magma burns one that does not. (The magma damage is the server's; it reaches the damage module
-/// as a generic one-point hit.)
+/// the ground at the end of the tick: slime slows a slow-moving player down unless it sneaks.
+///
+/// This is the *client's* `stepOn`: magma's `MagmaBlock.stepOn` hurts through `Entity.hurt`, which
+/// on a `ClientLevel` is `hurtClient` and does nothing, so the client never burns itself; the burn
+/// is the server's, from the server's own copy of the player when it is on the ground
+/// ([`crate::damage::server_do_tick`], using [`is_hot_floor`]), and reaches the client as a damage
+/// event and a health packet.
 pub fn step_on(p: &mut PlayerState, world: &World, on: (i32, i32, i32)) {
     let (x, y, z) = on;
-    match info(world.block_state(x, y, z)).kind {
-        Kind::Slime => {
-            let d = p.vel.y.abs();
-            if d < 0.1 && !p.shift_key_down {
-                let e = 0.4 + d * 0.2;
-                let v = p.vel;
-                p.vel = Vec3::new(v.x * e, v.y * 1.0, v.z * e);
-            }
+    if info(world.block_state(x, y, z)).kind == Kind::Slime {
+        let d = p.vel.y.abs();
+        if d < 0.1 && !p.shift_key_down {
+            let e = 0.4 + d * 0.2;
+            let v = p.vel;
+            p.vel = Vec3::new(v.x * e, v.y * 1.0, v.z * e);
         }
-        Kind::Magma if !p.shift_key_down => {
-            damage::hurt(p, DamageSource::Generic, 1.0);
-        }
-        _ => {}
     }
+}
+
+/// Whether the block at `on` is one whose `stepOn` hurts a living entity that is not stepping
+/// carefully (`MagmaBlock`: `hotFloor` damage of 1.0). The server applies it to the player when its
+/// own copy is on the ground; see [`crate::damage::server_do_tick`].
+pub fn is_hot_floor(world: &World, on: (i32, i32, i32)) -> bool {
+    info(world.block_state(on.0, on.1, on.2)).kind == Kind::Magma
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -681,7 +690,14 @@ impl InsideEffect {
         match self {
             InsideEffect::Freeze => {
                 p.in_powder_snow = true;
-                p.ticks_frozen = p.ticks_frozen.saturating_add(1).min(140);
+                if crate::effects::can_freeze(p) {
+                    p.ticks_frozen = p
+                        .ticks_frozen
+                        .saturating_add(1)
+                        .min(crate::effects::ticks_required_to_freeze());
+                }
+                // The server's `applyEffectsFromBlocks` raises it for the same step.
+                damage::note_freeze_step(p);
             }
             InsideEffect::ClearFreeze => crate::fluids::clear_freeze(p),
             InsideEffect::LavaIgnite => {
@@ -1067,6 +1083,8 @@ fn bubble_column_inside(p: &mut PlayerState, world: &World, pos: (i32, i32, i32)
     let drag_down = ms_data::property(state, "drag") == Some("true");
     let above = world.block_state(x, y + 1, z);
     let open_above = ms_data::collision_boxes(above).is_empty() && ms_data::fluid(above).is_empty();
+    // The server's copy of the player feels the same column during its own tick.
+    damage::note_bubble_column(p, drag_down, open_above);
     let v = p.vel;
     if open_above {
         let y = if drag_down {
@@ -1754,6 +1772,22 @@ mod tests {
         r.vel = Vec3::new(0.2, -0.0784, 0.0);
         step_on(&mut r, &w, (0, 0, 0));
         assert_eq!(r.vel, Vec3::new(0.2, -0.0784, 0.0));
+    }
+
+    #[test]
+    fn the_clients_step_on_magma_does_not_hurt_but_the_block_is_a_hot_floor() {
+        let w = world_with(&[
+            ((0, 0, 0), "minecraft:magma_block"),
+            ((1, 0, 0), "minecraft:stone"),
+        ]);
+        let mut p = player_at(0.5, 1.0, 0.5);
+        step_on(&mut p, &w, (0, 0, 0));
+        // `Entity.hurt` on the client is `hurtClient`: nothing happens; the server burns the player
+        // (`damage::server_do_tick`), when its own copy is on a hot floor.
+        assert_eq!(p.health, 20.0);
+        assert_eq!((p.invulnerable_time, p.hurt_time), (0, 0));
+        assert!(is_hot_floor(&w, (0, 0, 0)));
+        assert!(!is_hot_floor(&w, (1, 0, 0)));
     }
 
     #[test]
