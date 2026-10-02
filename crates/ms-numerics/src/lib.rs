@@ -4,9 +4,21 @@
 //! multiply-add except where the game uses it explicitly, and a vendored fdlibm for
 //! transcendentals rather than the platform math library. Position and velocity are `f64`,
 //! rotation is `f32`, and the conversions between the two must follow the game exactly.
+//!
+//! Modules:
+//! * [`mth`]: `net.minecraft.util.Mth` (table-driven `sin`/`cos`/`atan2`, `floor`, `clamp`,
+//!   `wrap_degrees`, ...) with Java's casting and NaN semantics.
+//! * [`fdlibm`]: Java's `StrictMath` (`Math.acos`, `Math.atan2`, `Math.atan` delegate to it),
+//!   ported from fdlibm 5.3, plus `StrictMath.log`.
+//! * [`hotspot`]: `Math.log` as HotSpot/x86_64 runs it, which is *not* `StrictMath.log`.
+//!
+//! Everything here is checked bit-for-bit against vectors recorded from the real JVM and game
+//! classes (`tests/`, `testdata/`; regenerate with `tools/refgen`).
 
 #![forbid(unsafe_code)]
 
+pub mod fdlibm;
+pub mod hotspot;
 pub mod mth;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
